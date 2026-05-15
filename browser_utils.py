@@ -184,3 +184,40 @@ def center_of(pts):
     cx = int(sum(p[0] for p in pts) / len(pts))
     cy = int(sum(p[1] for p in pts) / len(pts))
     return cx, cy
+
+
+def find_rightmost_cluster(img_strip, condition, min_pixels=15, gap=40):
+    """
+    找出圖像中最右側的顏色像素群集中心。
+
+    參數：
+        img_strip   PIL Image
+        condition   (r, g, b) -> bool，像素篩選條件
+        min_pixels  群集最少像素數（過濾雜訊，預設 15）
+        gap         超過此 x 距離視為不同群集（預設 40px）
+
+    回傳 (cx, cy) 相對於 img_strip 左上角，找不到回傳 None。
+    """
+    pts = find_color_pixels(img_strip, condition)
+    if not pts:
+        return None
+
+    pts.sort(key=lambda p: p[0])
+
+    clusters = []
+    current = [pts[0]]
+    for p in pts[1:]:
+        if p[0] - current[-1][0] <= gap:
+            current.append(p)
+        else:
+            if len(current) >= min_pixels:
+                clusters.append(current)
+            current = [p]
+    if len(current) >= min_pixels:
+        clusters.append(current)
+
+    if not clusters:
+        return None
+
+    rightmost = max(clusters, key=lambda c: max(p[0] for p in c))
+    return center_of(rightmost)

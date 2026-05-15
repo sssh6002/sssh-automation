@@ -13,8 +13,7 @@ from browser_utils import (
     maximize_and_focus,
     grab_window,
     click_at,
-    find_color_pixels,
-    center_of,
+    find_rightmost_cluster,
 )
 
 CHROME_PROFILE = "Profile 2"                  # 1504@sssh.tp.edu.tw
@@ -24,8 +23,8 @@ TITLE_KEYWORDS = ["sssh", "松山", "首頁"]
 
 def find_login_offset(hwnd):
     """
-    分析 nav bar 中的綠色「登入」文字，回傳相對視窗左上角的偏移 (offset_x, offset_y)。
-    找不到則回傳固定備用座標。
+    分析 nav bar 中最右側的綠色群集（即「登入」按鈕），
+    回傳相對視窗左上角的偏移 (offset_x, offset_y)。
     """
     img, r = grab_window(hwnd)
     ww = r.right - r.left
@@ -39,21 +38,13 @@ def find_login_offset(hwnd):
     def is_green(rv, gv, bv):
         return gv > rv + 30 and gv > bv + 30 and 50 < gv < 200
 
-    green_pts = find_color_pixels(strip, is_green)
-    print(f"      Nav strip 綠色像素：{len(green_pts)}")
-
-    # 全螢幕(>1500px)：「登入」在 x=1460-1545；窄視窗：x=280-420
-    x_min, x_max = (1460, 1545) if ww > 1500 else (280, 420)
-    targeted = [(x, y) for x, y in green_pts if x_min <= x <= x_max]
-    print(f"      目標範圍 x={x_min}-{x_max} 內像素：{len(targeted)}")
-
-    pts = targeted or green_pts
-    c = center_of(pts)
+    c = find_rightmost_cluster(strip, is_green)
     if c:
+        print(f"      找到最右側綠色群集：strip 座標 ({c[0]}, {c[1]})")
         return c[0], nav_y0 + c[1]
 
-    print("[WARN] 無綠色像素，使用固定座標")
-    return (1500 if ww > 1500 else 345), 142
+    print("[WARN] 找不到綠色群集，使用固定備用座標")
+    return ww - 200, 142
 
 
 def main():
