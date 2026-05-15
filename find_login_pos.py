@@ -1,45 +1,29 @@
-"""找出當前學校視窗 nav bar 中所有綠色群集位置，輸出到 login_pos.txt。"""
-import ctypes, ctypes.wintypes
-from PIL import ImageGrab, Image
+"""找出學校網站 nav bar 中所有綠色群集位置，輸出到 login_pos.txt。"""
+from PIL import Image
 import time
+from browser_utils import (
+    launch_chrome_and_wait, maximize_and_focus, grab_window
+)
 
-user32 = ctypes.windll.user32
-EnumWindowsProc = ctypes.WINFUNCTYPE(ctypes.c_bool, ctypes.c_int, ctypes.POINTER(ctypes.c_int))
+CHROME_PROFILE = "Profile 2"
+URL            = "https://www.sssh.tp.edu.tw"
+TITLE_KEYWORDS = ["sssh", "松山", "首頁"]
 
-found = []
-def cb(hwnd, _):
-    if user32.IsWindowVisible(hwnd):
-        buf = ctypes.create_unicode_buffer(256)
-        user32.GetWindowTextW(hwnd, buf, 256)
-        t = buf.value
-        if "Chrome" in t and any(k in t for k in ["sssh", "松山", "首頁"]):
-            r = ctypes.wintypes.RECT()
-            user32.GetWindowRect(hwnd, ctypes.byref(r))
-            found.append((hwnd, r.left, r.top, r.right - r.left, r.bottom - r.top))
-    return True
+print("開啟學校網站...")
+win = launch_chrome_and_wait(CHROME_PROFILE, URL, TITLE_KEYWORDS)
+if not win:
+    print("找不到學校視窗（超時）"); exit()
 
-user32.EnumWindows(EnumWindowsProc(cb), None)
-if not found:
-    print("找不到學校視窗"); exit()
+hwnd = win[0]
+print(f"視窗 HWND={hwnd}，size={win[3]}x{win[4]}")
+time.sleep(2)
 
-hwnd, wl, wt, ww, wh = found[0]
-print(f"視窗: HWND={hwnd} size={ww}x{wh}")
+print("最大化並截圖...")
+maximize_and_focus(hwnd)
+img, r = grab_window(hwnd)
+ww = r.right - r.left
+wh = r.bottom - r.top
 
-# 最大化並截圖
-SWP_NOMOVE = 0x0002; SWP_NOSIZE = 0x0001
-user32.ShowWindow(hwnd, 3)
-user32.SetWindowPos(hwnd, -1, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE)
-user32.SetForegroundWindow(hwnd)
-time.sleep(1.5)
-user32.SetWindowPos(hwnd, -2, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE)
-
-r2 = ctypes.wintypes.RECT()
-user32.GetWindowRect(hwnd, ctypes.byref(r2))
-wl, wt = r2.left, r2.top
-ww = r2.right - r2.left
-wh = r2.bottom - r2.top
-
-img = ImageGrab.grab(bbox=(r2.left, r2.top, r2.right, r2.bottom))
 nav_y0, nav_y1 = 90, min(210, int(wh * 0.25))
 strip = img.crop((0, nav_y0, ww, nav_y1))
 strip.save("nav_strip_now.png")
@@ -56,15 +40,18 @@ for y in range(nh):
             b = x // 20
             buckets[b] = buckets.get(b, 0) + 1
 
-lines = [f"視窗大小: {ww}x{wh}（最大化後）",
-         f"Nav strip: y={nav_y0}~{nav_y1}，寬={nw}px",
-         "綠色群集（strip_x = 視窗相對 x）："]
+lines = [
+    f"視窗大小: {ww}x{wh}（最大化後）",
+    f"Nav strip: y={nav_y0}~{nav_y1}，寬={nw}px",
+    "綠色群集（strip_x = 視窗相對 x）：",
+]
 for b in sorted(buckets.keys()):
     x0 = b * 20
     lines.append(f"  strip_x={x0:5d}~{x0+19}  像素數={buckets[b]}")
 
+output = "\n".join(lines)
 with open("login_pos.txt", "w", encoding="utf-8") as f:
-    f.write("\n".join(lines))
+    f.write(output)
 
-print("\n".join(lines))
+print(output)
 print("\n已儲存 nav_strip_now.png 和 login_pos.txt")
