@@ -3,7 +3,6 @@ result.png
 *.png
 
 # 診斷暫存檔
-*.txt
 !README.txt
 
 # Python
