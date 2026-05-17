@@ -10,9 +10,29 @@ main.py
 執行後跑指定 FEATURE，結束即回到原本的 PowerShell / CMD 視窗（不再進入選單迴圈）。
 """
 
+import subprocess
 import sys
 
 sys.stdout.reconfigure(encoding='utf-8')
+
+
+def _force_close_all_chrome():
+    """強制終止所有 chrome.exe 與 chromedriver.exe，避免 profile 鎖定或殘留狀態。
+    ⚠️ 警告：此動作會關掉使用者所有 Chrome 視窗（含其他 profile 的工作中分頁），
+    若需保留個人 Chrome 工作，請改用 scripts/close-profile2-chrome.ps1（只關 Selenium 相關）。
+    """
+    for img in ("chrome.exe", "chromedriver.exe"):
+        try:
+            subprocess.run(
+                ["taskkill", "/F", "/IM", img],
+                capture_output=True, timeout=10,
+            )
+        except Exception as e:
+            print(f"[警告] taskkill {img} 失敗：{e}")
+    print("[init] 已強制終止所有 chrome.exe / chromedriver.exe")
+
+
+_force_close_all_chrome()
 
 from taipeion_login import login_taipeion
 from taipeion_login_selenium import login_taipeion_selenium
