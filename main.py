@@ -4,6 +4,7 @@ main.py
 
 執行方式：
     C:\\Python314\\python.exe main.py
+    C:\\Python314\\python.exe c:\\Users\\ldc\\Documents\\GitHub\\sssh-automation\\main.py
 """
 
 import msvcrt
