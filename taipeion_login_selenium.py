@@ -23,7 +23,6 @@ import os
 import time
 
 import pyautogui
-from PIL import ImageGrab
 from selenium import webdriver
 from selenium.webdriver.chrome.options import Options
 from selenium.webdriver.common.by import By
@@ -211,7 +210,7 @@ def _click_chrome_allow_button():
 def login_taipeion_selenium():
     """開啟 TAIPEION 並用 Selenium 走完「自然人憑證 → 登入 → 允許對話框」流程。
     回傳 True 表示已到 PIN 輸入畫面，等待使用者插卡 + 輸入 PIN。"""
-    print(f"[1/5] 啟動 Chrome（Selenium 專用 profile：{USER_DATA_DIR}）...")
+    print(f"[1/6] 啟動 Chrome（Selenium 專用 profile：{USER_DATA_DIR}）...")
     os.makedirs(USER_DATA_DIR, exist_ok=True)
     _reset_crash_streak()
     if os.path.isdir(os.path.join(USER_DATA_DIR, PROFILE_DIR)):
@@ -234,7 +233,7 @@ def login_taipeion_selenium():
         print(f"[FATAL] 無法啟動 Chrome：{str(e)[:300]}")
         return False
 
-    print(f"[2/5] 開啟 {URL}")
+    print(f"[2/6] 開啟 {URL}")
     try:
         driver.get(URL)
     except TimeoutException:
@@ -283,7 +282,7 @@ def login_taipeion_selenium():
     except Exception as e:
         print(f"[final] 讀狀態失敗：{e}")
 
-    print("[完成] 已送出登入請求，請依畫面完成自然人憑證驗證（插卡 / 卡片 PIN 對話框）。")
+    print("[完成] 登入流程結束，已跳轉至 TAIPEION 入口網（或仍在最後驗證中）。")
     return True
 
 
