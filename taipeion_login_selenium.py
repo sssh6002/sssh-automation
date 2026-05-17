@@ -51,6 +51,14 @@ PIN_INPUT_XPATHS = [
     "//input[@id='pin']",
     "//input[contains(@name, 'pin')]",
 ]
+RECHECK_XPATHS = [
+    "//*[normalize-space()='重新檢測']",
+    "//*[normalize-space()='重新偵測卡片']",
+    "//button[contains(., '重新檢測')]",
+    "//button[contains(., '重新偵測卡片')]",
+    "//a[contains(., '重新檢測')]",
+    "//a[contains(., '重新偵測卡片')]",
+]
 
 # PIN 從 id.txt 讀。檔案不應該 commit（已在 .gitignore）。
 PIN_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "id.txt")
@@ -106,6 +114,47 @@ def _js_click(driver, xpaths, label, timeout=4):
             print(f"      x  {label} 點擊例外：{type(e).__name__}: {e}")
             continue
     print(f"[ERROR] {label} 全部 XPath 都失敗")
+    return False
+
+
+def _wait_for_login_button(driver, max_retries=8, interval=2.0):
+    """等讀卡機完成卡片偵測，「登入」按鈕真正可用。
+    若頁面顯示「重新檢測 / 重新偵測卡片」（卡片或讀卡機尚未就位），
+    依序點擊這些按鈕直到「登入」按鈕出現，最多 max_retries 次。
+    回傳是否在重試上限內看到「登入」。"""
+    for attempt in range(1, max_retries + 1):
+        # 看「登入」是否已出現
+        for xp in LOGIN_BTN_XPATHS:
+            try:
+                els = driver.find_elements(By.XPATH, xp)
+                for el in els:
+                    if el.is_displayed():
+                        print(f"      [check {attempt}] 已看到『登入』按鈕")
+                        return True
+            except Exception:
+                pass
+
+        # 沒「登入」→ 試著點「重新檢測 / 重新偵測卡片」
+        clicked = False
+        for xp in RECHECK_XPATHS:
+            try:
+                els = driver.find_elements(By.XPATH, xp)
+                for el in els:
+                    if el.is_displayed():
+                        driver.execute_script("arguments[0].click();", el)
+                        print(f"      [retry {attempt}] 點到 {xp}")
+                        clicked = True
+                        break
+                if clicked:
+                    break
+            except Exception:
+                pass
+
+        if not clicked:
+            print(f"      [retry {attempt}] 找不到登入或重新檢測按鈕，等 {interval}s")
+        time.sleep(interval)
+
+    print(f"[WARN] 重試 {max_retries} 次後仍未看到『登入』按鈕")
     return False
 
 
@@ -205,6 +254,10 @@ def login_taipeion_selenium():
 
     # 切到分頁後 HiCOS 元件可能再要求一次權限，保險再點一次
     _click_chrome_allow_button()
+
+    # 卡片/讀卡機未就位時頁面顯示「重新檢測 / 重新偵測卡片」，需重複點擊直到「登入」出現
+    print("[4.5/6] 等讀卡機完成卡片偵測，必要時點重新檢測...")
+    _wait_for_login_button(driver)
 
     print("[5/6] 自動填入 PIN（從 id.txt 讀）...")
     pin = _read_pin()
