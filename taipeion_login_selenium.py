@@ -218,6 +218,20 @@ def login_taipeion_selenium():
     if not _js_click(driver, LOGIN_BTN_XPATHS, "登入按鈕"):
         return False
 
+    # 等系統處理登入後再記錄最終狀態（包含可能的跳轉）
+    time.sleep(5)
+    final_state = os.path.join(os.path.dirname(os.path.abspath(__file__)), "final_state.png")
+    try:
+        driver.save_screenshot(final_state)
+        print(f"[final] Selenium 截圖 → {final_state}")
+    except Exception as e:
+        print(f"[final] 截圖失敗：{e}")
+    try:
+        print(f"[final] URL：{driver.current_url}")
+        print(f"[final] 標題：{driver.title}")
+    except Exception as e:
+        print(f"[final] 讀狀態失敗：{e}")
+
     print("[完成] 已送出登入請求，請依畫面完成自然人憑證驗證（插卡 / 卡片 PIN 對話框）。")
     return True
 
