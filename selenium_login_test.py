@@ -28,6 +28,7 @@ selenium_login_test.py
   C. 是否跳出 Windows 憑證選擇對話框 / 密碼欄是否帶入儲存密碼
 """
 
+import json
 import os
 import sys
 import time
@@ -62,6 +63,28 @@ LOGIN_BTN_XPATHS = [
     "//a[normalize-space()='登入']",
     "//button[contains(., '登入')]",
 ]
+
+
+def mark_profile_clean_exit():
+    """
+    將 profile 的 Preferences 標記為正常退出，跳過「Chrome 未正確關閉，是否還原網頁」對話框。
+    Selenium 強制接管 profile 時 Chrome 會把上次視為異常終止，需要這個處理。
+    """
+    prefs_path = os.path.join(USER_DATA_DIR, PROFILE_DIR, "Preferences")
+    if not os.path.isfile(prefs_path):
+        print(f"      [警告] 找不到 Preferences：{prefs_path}")
+        return
+    try:
+        with open(prefs_path, "r", encoding="utf-8") as f:
+            prefs = json.load(f)
+        profile = prefs.setdefault("profile", {})
+        profile["exit_type"] = "Normal"
+        profile["exited_cleanly"] = True
+        with open(prefs_path, "w", encoding="utf-8") as f:
+            json.dump(prefs, f)
+        print("      Preferences 已標記為正常退出，跳過還原網頁提示。")
+    except Exception as e:
+        print(f"      [警告] 無法修改 Preferences：{e}")
 
 
 def try_click(driver, xpaths, label, timeout=8):
@@ -101,6 +124,8 @@ def main():
     if not os.path.isdir(os.path.join(USER_DATA_DIR, PROFILE_DIR)):
         print(f"[FATAL] 找不到 profile 目錄：{os.path.join(USER_DATA_DIR, PROFILE_DIR)}")
         return
+
+    mark_profile_clean_exit()
 
     options = Options()
     options.add_argument(f"--user-data-dir={USER_DATA_DIR}")
