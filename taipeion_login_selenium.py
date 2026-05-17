@@ -8,11 +8,14 @@ taipeion_login_selenium.py
   - 用 pyautogui 點 Chrome 站台權限對話框「允許」按鈕（Chrome 瀏覽器級 UI，
     無法用 Selenium 點，且授權後 Chrome 會記住，下次同 origin 不再跳）
   - 用 JS 點擊（execute_script）繞過頁面遮罩
-  - 跑完留下瀏覽器（detach），使用者插卡 + 輸入 PIN 即可完成登入
+  - 自動讀 id.txt 填 PIN 並送出登入；卡片偵測失敗時自動點「重新檢測」重試
+
+注意：本流程必須在「螢幕未鎖定」狀態下執行 — Windows 鎖屏會阻擋
+Smart Card API，HiCOS 無法讀卡。
 
 從其他腳本呼叫：
     from taipeion_login_selenium import login_taipeion_selenium
-    ok = login_taipeion_selenium()  # 回傳 True 表示流程到 PIN 輸入畫面
+    ok = login_taipeion_selenium()  # 回傳 True 表示流程跑完
 """
 
 import json
@@ -111,13 +114,10 @@ def _js_click(driver, xpaths, label, timeout=4):
     return False
 
 
-def _wait_for_login_button(driver, max_retries=3, interval=5.0):
-    """等讀卡機完成卡片偵測，「登入」按鈕真正可用。
-    若頁面顯示「重新檢測」/「重新偵測卡片」（兩個獨立按鈕），
-    每輪都把兩個都點一次，**用 Selenium 原生 click（不是 JS 合成）**，
-    然後等 interval 秒給 HiCOS 完成卡片讀取。手動使用觀察值：
-    點一次「重新檢測」後 HiCOS 需要約 3-5 秒完成偵測，期間頁面看似沒變化。
-    """
+def _wait_for_login_button(driver, max_retries=2, interval=3.0):
+    """若頁面顯示「重新檢測」/「重新偵測卡片」（卡片偵測未完成），
+    依序點兩個按鈕（用 Selenium 原生 click），等 HiCOS 完成讀卡後「登入」會出現。
+    每輪 interval 秒，最多 max_retries 輪；HiCOS 一般需要約 3-5 秒完成偵測。"""
     for attempt in range(1, max_retries + 1):
         # 看「登入」是否已出現
         for xp in LOGIN_BTN_XPATHS:
