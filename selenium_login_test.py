@@ -34,7 +34,8 @@ import os
 import sys
 import time
 
-sys.stdout.reconfigure(encoding='utf-8')
+sys.stdout.reconfigure(encoding='utf-8', line_buffering=True)
+sys.stderr.reconfigure(encoding='utf-8', line_buffering=True)
 
 import pyautogui
 from PIL import ImageGrab
@@ -48,6 +49,19 @@ from selenium.common.exceptions import TimeoutException, WebDriverException
 pyautogui.FAILSAFE = False
 
 URL = "https://login.gov.taipei/login.php"
+LOG_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "selenium_login_test.log")
+
+
+def log(msg):
+    """同時印到 stdout 與寫到 LOG_FILE。stdout 可能被 harness 緩衝，
+    log 檔可立即在磁碟上看到，方便 debug 卡住的位置。"""
+    line = f"{time.strftime('%H:%M:%S')} {msg}"
+    print(line, flush=True)
+    try:
+        with open(LOG_FILE, "a", encoding="utf-8") as f:
+            f.write(line + "\n")
+    except Exception:
+        pass
 
 # Selenium 專用 Chrome User Data 目錄（非預設位置，繞過 Chrome 136+ 自動化限制）
 # 首次執行 Chrome 會自動建立此目錄。使用者於此 profile 手動登入一次後，
@@ -94,63 +108,70 @@ def mark_profile_clean_exit():
         print(f"      [警告] 無法修改 Preferences：{e}")
 
 
-def try_click(driver, xpaths, label, timeout=8):
-    """依序嘗試多組 XPath，回傳第一個成功點到的元素描述；全失敗則回傳 None。"""
+def try_click(driver, xpaths, label, timeout=4):
+    """依序嘗試多組 XPath，回傳第一個成功點到的元素描述；全失敗則回傳 None。
+    使用 JS 點擊以繞過頁面遮罩/疊加層阻擋。"""
     wait = WebDriverWait(driver, timeout)
     for xp in xpaths:
         try:
-            el = wait.until(EC.element_to_be_clickable((By.XPATH, xp)))
-            el.click()
-            print(f"      OK：以 XPath 命中 → {xp}")
+            el = wait.until(EC.presence_of_element_located((By.XPATH, xp)))
+            # 用 JS 點擊避免被遮罩擋住
+            driver.execute_script("arguments[0].scrollIntoView({block:'center'}); arguments[0].click();", el)
+            log(f"      OK：以 XPath JS 點擊 → {xp}")
             return xp
         except TimeoutException:
-            print(f"      x  XPath 失敗 → {xp}")
+            log(f"      x  XPath 找不到 → {xp}")
             continue
-    print(f"[ERROR] {label} 全部 XPath 都失敗。")
+        except Exception as e:
+            log(f"      x  XPath {xp} 點擊例外：{type(e).__name__}: {e}")
+            continue
+    log(f"[ERROR] {label} 全部 XPath 都失敗。")
     return None
 
 
-def click_chrome_allow_button(driver, timeout=6):
+def grab_desktop(path):
+    """擷取整個桌面（含 Chrome UI、瀏覽器級對話框）儲存到 path。
+    driver.save_screenshot() 只截網頁區域，看不到 Chrome chrome-level 對話框。"""
+    try:
+        img = ImageGrab.grab()
+        img.save(path)
+        return True
+    except Exception as e:
+        log(f"      [警告] 桌面截圖失敗：{e}")
+        return False
+
+
+def click_chrome_allow_button(timeout_wait=2.0):
     """
-    偵測並點擊 Chrome 站台權限對話框的「允許」按鈕。
+    點擊 Chrome 站台權限對話框「允許」按鈕。
 
-    這個對話框是 Chrome 瀏覽器級 UI（不在頁面 DOM 內），Selenium 無法直接點擊，
-    必須以螢幕座標 + pyautogui 處理。
-
-    搜尋邏輯：在 URL bar 下方左側區域找 Chrome 主要按鈕的淺藍色像素群集，取其中心點擊。
+    對話框錨點為 URL bar 左側下方，按鈕為「淺底 + Chrome 藍邊+文字」風格，
+    不是純藍背景；像素偵測難度高，改用實測螢幕座標。
     Chrome 對話框允許後會記在 profile 內，下次同 origin 不再跳。
     """
-    pos = driver.get_window_position()
-    size = driver.get_window_size()
-    x0 = pos['x']
-    y0 = pos['y'] + 95            # URL bar 高度估計
-    x1 = x0 + min(700, size['width'])
-    y1 = y0 + 260
-    print(f"      搜尋區域：({x0},{y0})~({x1},{y1})")
+    # 等對話框完全渲染
+    time.sleep(timeout_wait)
 
-    start = time.time()
-    while time.time() - start < timeout:
-        img = ImageGrab.grab(bbox=(x0, y0, x1, y1))
-        pixels = img.load()
-        w, h = img.size
-        blue_pts = []
-        for y in range(h):
-            for x in range(w):
-                r, g, b = pixels[x, y][:3]
-                # Chrome 主要動作鈕的淺藍背景（約 #C7DEFF 範圍）
-                if b > 230 and g > 200 and r < 225 and (b - r) > 25 and (b - g) > 5:
-                    blue_pts.append((x, y))
-        if len(blue_pts) >= 200:
-            cx = sum(p[0] for p in blue_pts) // len(blue_pts)
-            cy = sum(p[1] for p in blue_pts) // len(blue_pts)
-            click_x, click_y = x0 + cx, y0 + cy
-            pyautogui.click(click_x, click_y)
-            print(f"      ✓ 已點擊「允許」於螢幕座標 ({click_x},{click_y})（{len(blue_pts)} 個藍色像素）")
-            return True
-        time.sleep(0.3)
+    # 點擊前截圖供 debug
+    before_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "before_allow_click.png")
+    grab_desktop(before_path)
+    log(f"      點擊前桌面截圖 → {before_path}")
 
-    print("      x  逾時未偵測到「允許」按鈕（可能 Chrome 已記住權限不再跳對話框）")
-    return False
+    # 實測座標：對話框錨在 URL bar 左下，「允許」按鈕中心約在 (322, 197)
+    allow_x, allow_y = 322, 197
+    try:
+        pyautogui.moveTo(allow_x, allow_y, duration=0.2)
+        pyautogui.click()
+        log(f"      已點擊『允許』於 ({allow_x}, {allow_y})")
+    except Exception as e:
+        log(f"      pyautogui 點擊失敗：{e}")
+        return False
+
+    time.sleep(1.0)
+    after_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "after_allow_click.png")
+    grab_desktop(after_path)
+    log(f"      點擊後桌面截圖 → {after_path}")
+    return True
 
 
 def dump_page_for_debug(driver):
@@ -169,11 +190,17 @@ def dump_page_for_debug(driver):
 
 
 def main():
-    print(f"[0/4] 使用 Selenium 專用 profile：{PROFILE_DIR}")
-    print(f"      路徑：{USER_DATA_DIR}")
+    # 清空 log file 開始新的一輪
+    try:
+        open(LOG_FILE, "w", encoding="utf-8").close()
+    except Exception:
+        pass
+
+    log(f"[0/5] 使用 Selenium 專用 profile：{PROFILE_DIR}")
+    log(f"      路徑：{USER_DATA_DIR}")
     profile_path = os.path.join(USER_DATA_DIR, PROFILE_DIR)
     if not os.path.isdir(profile_path):
-        print(f"      首次執行 — Chrome 將自動建立此目錄")
+        log(f"      首次執行 — Chrome 將自動建立此目錄")
         os.makedirs(USER_DATA_DIR, exist_ok=True)
     else:
         mark_profile_clean_exit()
@@ -190,94 +217,78 @@ def main():
     options.add_experimental_option("excludeSwitches", ["enable-automation", "enable-logging"])
     options.add_experimental_option("useAutomationExtension", False)
 
-    print("[1/5] 啟動 Chrome（Selenium Manager 自動下載對應 ChromeDriver）...")
+    log("[1/5] 啟動 Chrome（Selenium Manager 自動下載對應 ChromeDriver）...")
     try:
         driver = webdriver.Chrome(options=options)
+        driver.set_page_load_timeout(15)
+        driver.set_script_timeout(10)
     except WebDriverException as e:
         msg = str(e)
-        print(f"[FATAL] 無法啟動 Chrome。完整錯誤訊息：")
-        print("─" * 60)
-        print(msg)
-        print("─" * 60)
+        log(f"[FATAL] 無法啟動 Chrome：")
+        log(msg[:500])
         if "user data directory is already in use" in msg.lower():
-            print("提示：請先關閉所有 1504@sssh.tp.edu.tw（Profile 2）的 Chrome 視窗再執行。")
+            log("提示：請先關閉佔用此 profile 的 Chrome 視窗再執行。")
         return
 
     try:
-        print(f"[2/5] 開啟 {URL}")
-        driver.get(URL)
-        time.sleep(2)
-
-        # Profile 2 可能還原多個 tab，先列印全部 window/tab 資訊以便除錯
-        handles_before = list(driver.window_handles)
-        print(f"      啟動後共 {len(handles_before)} 個 window/tab：")
-        target = None
-        for h in handles_before:
-            driver.switch_to.window(h)
-            cur_url = driver.current_url
-            cur_title = driver.title
-            print(f"        - [{h[:8]}...] title='{cur_title}' url={cur_url}")
-            if "login.gov.taipei" in cur_url and target is None:
-                target = h
-
-        if target is None:
-            print("      [警告] 沒有任何 tab 在 login.gov.taipei，於第一個 tab 重新導向...")
-            driver.switch_to.window(handles_before[0])
-            driver.get(URL)
-            target = handles_before[0]
-        else:
-            extras = [h for h in handles_before if h != target]
-            if extras:
-                print(f"      偵測到 {len(extras)} 個額外 tab（session restore），關閉以保持單一視窗")
-                for h in extras:
-                    driver.switch_to.window(h)
-                    driver.close()
-                driver.switch_to.window(target)
-
-        # 強制把目標 tab 視覺上拉到最前面
+        log(f"[2/5] 開啟 {URL}")
         try:
-            driver.execute_script("window.focus();")
-        except Exception:
-            pass
+            driver.get(URL)
+        except TimeoutException:
+            log("      [警告] 頁面載入超過 15 秒，繼續執行（HiCOS 元件可能仍在背景載入）")
+
+        handles_before = list(driver.window_handles)
+        log(f"      啟動後共 {len(handles_before)} 個 window/tab")
+        if len(handles_before) > 1:
+            for h in handles_before[1:]:
+                driver.switch_to.window(h)
+                driver.close()
+        driver.switch_to.window(handles_before[0])
+
         try:
             driver.maximize_window()
         except Exception:
             pass
 
-        print(f"      切換後 URL：{driver.current_url}")
-        print(f"      頁面標題：{driver.title}")
+        # 頁面剛開可能立刻跳 Chrome 站台權限對話框（HiCOS 元件需要存取裝置），
+        # 此對話框會阻擋部分頁面互動。預先點一次「允許」避免後續 Selenium 命令 timeout。
+        log("[Pre] 預先嘗試點擊 Chrome 站台權限對話框（若有）...")
+        try:
+            click_chrome_allow_button(timeout_wait=2.0)
+        except Exception as e:
+            log(f"      預先點擊權限對話框例外：{e}")
 
-        print("[3/5] 點選『自然人憑證』分頁...")
+        log("[3/5] 點選『自然人憑證』分頁...")
         if not try_click(driver, CERT_TAB_XPATHS, "自然人憑證分頁"):
             dump_page_for_debug(driver)
             return
         time.sleep(1.5)
 
-        print("[4/5] 點選『登入』按鈕...")
+        log("[4/5] 點選『登入』按鈕...")
         if not try_click(driver, LOGIN_BTN_XPATHS, "登入按鈕"):
             dump_page_for_debug(driver)
             return
         time.sleep(2)
 
-        print("[5/5] 偵測 Chrome 站台權限對話框並自動點『允許』...")
-        click_chrome_allow_button(driver)
-        time.sleep(1.5)
-
-        # 存截圖供使用者檢查當下畫面
-        screenshot_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "after_login_click.png")
+        log("[5/5] 自動點擊 Chrome 站台權限對話框「允許」按鈕...")
         try:
-            driver.save_screenshot(screenshot_path)
-            print(f"\n[截圖] {screenshot_path}")
+            click_chrome_allow_button()
         except Exception as e:
-            print(f"\n[截圖] 儲存失敗：{e}")
+            log(f"      click_chrome_allow_button 例外：{type(e).__name__}: {e}")
 
-        print(f"      點擊後 URL：{driver.current_url}")
-        print(f"      頁面標題：{driver.title}")
-        print("      瀏覽器保持開啟，可接手人工完成或關閉。")
+        try:
+            log(f"      最終 URL：{driver.current_url}")
+            log(f"      頁面標題：{driver.title}")
+        except Exception as e:
+            log(f"      讀取頁面狀態失敗：{e}")
+        log("[完成] 瀏覽器保持開啟，請依畫面插入卡片並輸入 PIN。")
 
     except Exception as e:
-        print(f"[ERROR] 流程中斷：{e}")
-        dump_page_for_debug(driver)
+        log(f"[ERROR] 流程中斷：{type(e).__name__}: {e}")
+        try:
+            dump_page_for_debug(driver)
+        except Exception:
+            pass
 
 
 if __name__ == "__main__":

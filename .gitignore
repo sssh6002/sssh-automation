@@ -12,3 +12,6 @@ __pycache__/
 
 # Claude Code 本地設定（個人權限，不分享）
 .claude/settings.local.json
+
+# Selenium 測試 log
+selenium_login_test.log
