@@ -62,18 +62,47 @@ PIN_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "id.txt")
 
 
 def _mark_profile_clean_exit():
-    """避免 Chrome 跳「未正確關閉，是否還原網頁」對話框。"""
-    prefs_path = os.path.join(USER_DATA_DIR, PROFILE_DIR, "Preferences")
-    if not os.path.isfile(prefs_path):
-        return
-    try:
-        with open(prefs_path, "r", encoding="utf-8") as f:
-            prefs = json.load(f)
-        prefs.setdefault("profile", {}).update({"exit_type": "Normal", "exited_cleanly": True})
-        with open(prefs_path, "w", encoding="utf-8") as f:
-            json.dump(prefs, f)
-    except Exception:
-        pass
+    """徹底壓掉「Chrome 未正確關閉，要還原網頁嗎？」對話框 — 雙管齊下：
+       1) Preferences 改 exit_type=Normal、exited_cleanly=True，並把 session 還原
+          模式設為「開新分頁」（restore_on_startup=5），避免不小心還原。
+       2) 刪掉 session 殘留檔（Last/Current Session、Last/Current Tabs、Sessions/
+          整個目錄）。這 profile 是 Selenium 專用，不必保留分頁。
+       Chrome 啟動旗標 --disable-session-crashed-bubble / --hide-crash-restore-bubble
+       是第三層保險，在 login_taipeion_selenium() 內設定。"""
+    profile_path = os.path.join(USER_DATA_DIR, PROFILE_DIR)
+    prefs_path = os.path.join(profile_path, "Preferences")
+    if os.path.isfile(prefs_path):
+        try:
+            with open(prefs_path, "r", encoding="utf-8") as f:
+                prefs = json.load(f)
+            prefs.setdefault("profile", {}).update({
+                "exit_type": "Normal",
+                "exited_cleanly": True,
+            })
+            # restore_on_startup=5 → 開新分頁；4=指定 URL；1=最後分頁。設 5 最保險
+            prefs.setdefault("session", {})["restore_on_startup"] = 5
+            with open(prefs_path, "w", encoding="utf-8") as f:
+                json.dump(prefs, f)
+        except Exception:
+            pass
+
+    # 刪 profile 根目錄下的 session 殘留檔
+    for filename in ("Last Session", "Last Tabs", "Current Session", "Current Tabs"):
+        p = os.path.join(profile_path, filename)
+        if os.path.isfile(p):
+            try:
+                os.remove(p)
+            except Exception:
+                pass
+
+    # 清 Sessions/ 子目錄（裡面是 SNSS 二進位 session 快照）
+    sessions_dir = os.path.join(profile_path, "Sessions")
+    if os.path.isdir(sessions_dir):
+        for name in os.listdir(sessions_dir):
+            try:
+                os.remove(os.path.join(sessions_dir, name))
+            except Exception:
+                pass
 
 
 def _reset_crash_streak():
@@ -226,6 +255,12 @@ def login_taipeion_selenium(return_driver=False):
     options.add_argument(f"--profile-directory={PROFILE_DIR}")
     options.add_argument("--start-maximized")
     options.add_argument("--disable-blink-features=AutomationControlled")
+    # 壓掉 taskkill 後啟動 Chrome 會跳的「未正確關閉 / 是否還原網頁」泡泡 + 對話框
+    options.add_argument("--disable-session-crashed-bubble")
+    options.add_argument("--hide-crash-restore-bubble")
+    options.add_argument("--no-first-run")
+    options.add_argument("--no-default-browser-check")
+    options.add_argument("--restore-last-session=false")
     options.add_experimental_option("detach", True)
     options.add_experimental_option("excludeSwitches", ["enable-automation", "enable-logging"])
     options.add_experimental_option("useAutomationExtension", False)
