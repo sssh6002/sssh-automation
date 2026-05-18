@@ -1,0 +1,24 @@
+{
+    "folders": [
+        {
+            "path": "."
+        }
+    ],
+    "settings": {
+        "files.encoding": "utf8",
+        "files.eol": "\n",
+        "[python]": {
+            "editor.tabSize": 4,
+            "editor.insertSpaces": true
+        },
+        "[powershell]": {
+            "editor.tabSize": 4,
+            "editor.insertSpaces": true
+        },
+        "[markdown]": {
+            "editor.wordWrap": "on"
+        },
+        "terminal.integrated.defaultProfile.windows": "PowerShell",
+        "python.defaultInterpreterPath": "C:\\Python314\\python.exe"
+    }
+}
