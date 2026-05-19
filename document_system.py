@@ -103,6 +103,60 @@ def process_document_system(driver):
     return True
 
 
+def _standalone_open_chrome_at_edoc():
+    """單獨執行時開 Chrome 並導航到 edoc 公文首頁。
+
+    流程：
+    1. 預清理 Selenium Chrome（避免 profile 被前一次 detach 的 Chrome 鎖住）
+    2. 用 _build_chrome_options() 建 options，與 main.py 完全一致
+    3. driver.get(EDOC_HOME_URL)，sleep 2 後檢查 current_url
+    4. 若被導去 login.gov.taipei / sso → session 過期，印提示後回 None
+    回傳 driver 或 None。
+    """
+    from selenium import webdriver
+    from selenium.common.exceptions import WebDriverException
+
+    from taipeion_login_selenium import _build_chrome_options, _close_selenium_chrome_only
+
+    print("[standalone] 預清理上一次 Selenium Chrome (若有)...")
+    _close_selenium_chrome_only()
+
+    print("[standalone 1/2] 啟動 Chrome（用 Selenium profile）...")
+    options = _build_chrome_options()
+    try:
+        driver = webdriver.Chrome(options=options)
+        driver.set_page_load_timeout(15)
+        driver.set_script_timeout(10)
+    except WebDriverException as e:
+        print(f"[FATAL] 無法啟動 Chrome：{str(e)[:300]}")
+        return None
+
+    print(f"[standalone 2/2] 導航到 {EDOC_HOME_URL}")
+    try:
+        driver.get(EDOC_HOME_URL)
+    except TimeoutException:
+        print("      [警告] 頁面載入超時，繼續執行")
+
+    # 給 redirect 一點時間（session 過期會被導去 login.gov.taipei 或 sso）
+    time.sleep(2)
+    try:
+        current = driver.current_url
+    except Exception as e:
+        print(f"[FATAL] 讀 current_url 失敗：{type(e).__name__}: {e}")
+        return None
+
+    if "edoc.gov.taipei" not in current:
+        print(f"[ERROR] 沒進到 edoc，被導向：{current}")
+        print("        session 可能過期，請先跑 C:\\Python314\\python.exe main.py 重新登入")
+        return None
+
+    print(f"      OK：已在 edoc — {current}")
+    return driver
+
+
 if __name__ == "__main__":
-    print("[ERROR] standalone 入口尚未實作（Task 4 才加）")
-    sys.exit(1)
+    driver = _standalone_open_chrome_at_edoc()
+    if driver is None:
+        sys.exit(1)
+    ok = process_document_system(driver)
+    sys.exit(0 if ok else 1)
