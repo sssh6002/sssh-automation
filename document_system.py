@@ -14,7 +14,6 @@ document_system.py
 helper（_open_first_document、_handle_document_list 等）。
 """
 
-import os
 import sys
 import time
 
