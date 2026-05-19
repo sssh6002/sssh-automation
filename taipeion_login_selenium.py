@@ -455,18 +455,26 @@ def login_taipeion_selenium(return_driver=False):
     options.add_argument("--no-first-run")
     options.add_argument("--no-default-browser-check")
     options.add_argument("--restore-last-session=false")
-    # 關閉 Chrome Private Network Access (PNA) preflight 與相關阻擋：
-    # edoc.gov.taipei (公開來源) 會 fetch 本地 TCGServiSign 簽章元件
-    # (https://127.0.0.1:56420/56520/56620)。Chrome 從 94/119 起對「公開站台 → 私有 IP」
-    # 做 preflight CORS 並要求 profile 內預先授權；個人 Chrome Profile 2 早授權過，
-    # 全新 Selenium profile 沒授權，preflight 直接被擋 → 頁面顯示「簽章元件未啟動」。
-    # 關掉這幾個 feature 後 PNA 不再擋；只影響 fetch private network 的行為，不影響
-    # 一般網頁安全性。
+    # 關閉 Chrome Local Network Access (LNA) + Private Network Access (PNA) 阻擋：
+    # edoc.gov.taipei (公開來源) 會 fetch 兩個本地簽章元件：
+    #   - https://127.0.0.1:56420/56520/56620 (TCGServiSign by Changingtec)
+    #   - http://127.0.0.1:16888 (公文系統 KdApp javaw 本地元件，HTTP not HTTPS)
+    # Chrome 142+ 把 LNA 預設啟用，console 印
+    #   "blocked by CORS policy: Permission was denied for this request to access
+    #    the `loopback` address space"
+    # — 這是 LNA 訊息（不是 PNA）。LNA 比 PNA 嚴 — 完全不准 fetch loopback 除非
+    # profile 授權過。個人 Chrome Profile 2 早授權，Selenium 全新 profile 沒。
+    # 同時關掉 PNA 三個 feature 當保險；只影響 fetch loopback/private network，
+    # 不動一般網頁安全性。
     options.add_argument(
-        "--disable-features=BlockInsecurePrivateNetworkRequests,"
+        "--disable-features=LocalNetworkAccessChecks,"
+        "BlockInsecurePrivateNetworkRequests,"
         "PrivateNetworkAccessRespectPreflightResults,"
         "PrivateNetworkAccessSendPreflights"
     )
+    # 允許 HTTPS 頁面 fetch http://127.0.0.1:16888 (公文 KdApp 元件是 HTTP)；
+    # 不加會被 mixed content 擋（已在 console log 看到 Mixed Content 警告）。
+    options.add_argument("--allow-running-insecure-content")
     options.add_experimental_option("detach", True)
     options.add_experimental_option("excludeSwitches", ["enable-automation", "enable-logging"])
     options.add_experimental_option("useAutomationExtension", False)
