@@ -225,13 +225,101 @@ def _fill_pin(driver, pin, timeout=3):
     return False
 
 
-def _bring_chrome_to_foreground():
-    """把 Chrome 視窗拉到最上層，否則 pyautogui 點到的可能是 VSCode/別的視窗。
+def _get_selenium_chrome_pids(driver):
+    """走 chromedriver 的 process tree，回傳所有 chrome.exe descendant PID 集合。
 
-    用 EnumWindows + 比對 class name 'Chrome_WidgetWin_1' 找到第一個可見的 Chrome
-    視窗，再用 SetForegroundWindow 拉到前面。為繞過 Windows 對 SetForegroundWindow
-    的「只有前景程序能設定前景」限制，先 keyDown/keyUp 一次 Alt 鍵讓本程序短暫取得
-    前景權限（這是常見 hack，不影響功能）。
+    用途：_bring_chrome_to_foreground 要把 Selenium 控制的 Chrome 拉到前景，不能
+    誤抓 VSCode（Electron app，class name 同樣是 Chrome_WidgetWin_1）或使用者
+    個人 Chrome（同 exe 名 chrome.exe，但不在 chromedriver process tree 內）。
+    用 Toolhelp32 走 chromedriver → chrome.exe (browser) → chrome.exe (renderer)
+    的 process tree，回傳所有 chrome.exe 的 PID。BFS 走完整 tree，因為 chromedriver
+    對 chrome.exe browser process 是直接子，renderer/GPU 是孫。
+    無法取得時回傳空集合（呼叫端會 fallback 到 exe 名 chrome.exe 過濾）。
+    """
+    if driver is None:
+        return set()
+    try:
+        chromedriver_pid = driver.service.process.pid
+    except Exception:
+        return set()
+
+    import ctypes
+    from ctypes import wintypes
+
+    TH32CS_SNAPPROCESS = 0x00000002
+
+    class PROCESSENTRY32W(ctypes.Structure):
+        _fields_ = [
+            ("dwSize", wintypes.DWORD),
+            ("cntUsage", wintypes.DWORD),
+            ("th32ProcessID", wintypes.DWORD),
+            ("th32DefaultHeapID", ctypes.c_size_t),
+            ("th32ModuleID", wintypes.DWORD),
+            ("cntThreads", wintypes.DWORD),
+            ("th32ParentProcessID", wintypes.DWORD),
+            ("pcPriClassBase", ctypes.c_long),
+            ("dwFlags", wintypes.DWORD),
+            ("szExeFile", wintypes.WCHAR * 260),
+        ]
+
+    try:
+        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        kernel32.CreateToolhelp32Snapshot.restype = wintypes.HANDLE
+        kernel32.Process32FirstW.argtypes = [wintypes.HANDLE, ctypes.POINTER(PROCESSENTRY32W)]
+        kernel32.Process32FirstW.restype = wintypes.BOOL
+        kernel32.Process32NextW.argtypes = [wintypes.HANDLE, ctypes.POINTER(PROCESSENTRY32W)]
+        kernel32.Process32NextW.restype = wintypes.BOOL
+        kernel32.CloseHandle.argtypes = [wintypes.HANDLE]
+
+        snapshot = kernel32.CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0)
+        if not snapshot or snapshot == wintypes.HANDLE(-1).value:
+            return set()
+        try:
+            parent_to_children = {}
+            entry = PROCESSENTRY32W()
+            entry.dwSize = ctypes.sizeof(PROCESSENTRY32W)
+            if not kernel32.Process32FirstW(snapshot, ctypes.byref(entry)):
+                return set()
+            while True:
+                parent_to_children.setdefault(entry.th32ParentProcessID, []).append(
+                    (entry.th32ProcessID, entry.szExeFile.lower())
+                )
+                if not kernel32.Process32NextW(snapshot, ctypes.byref(entry)):
+                    break
+
+            pids = set()
+            queue = [chromedriver_pid]
+            seen = {chromedriver_pid}
+            while queue:
+                pid = queue.pop()
+                for child_pid, child_exe in parent_to_children.get(pid, []):
+                    if child_pid in seen:
+                        continue
+                    seen.add(child_pid)
+                    if child_exe == "chrome.exe":
+                        pids.add(child_pid)
+                    queue.append(child_pid)
+            return pids
+        finally:
+            kernel32.CloseHandle(snapshot)
+    except Exception:
+        return set()
+
+
+def _bring_chrome_to_foreground(driver=None):
+    """把 Selenium 控制的 Chrome 視窗拉到最上層，否則 pyautogui 點到的可能是
+    VSCode/個人 Chrome/其他視窗。
+
+    用 EnumWindows + class name 'Chrome_WidgetWin_1' 找 Chrome，再用
+    SetForegroundWindow 拉到前面。為繞過 Windows 對 SetForegroundWindow 的「只有
+    前景程序能設定前景」限制，先 keyDown/keyUp 一次 Alt 鍵讓本程序短暫取得前景權限。
+
+    重要：**單純比對 class name 不夠**。`Chrome_WidgetWin_1` 是所有 Chromium-based
+    應用共用 — 包含 VSCode 等 Electron app 以及使用者個人 Chrome。若 driver 已傳入，
+    用 _get_selenium_chrome_pids 取得 Selenium Chrome 的 PID 集合，
+    GetWindowThreadProcessId 過濾才能保證抓到正確視窗。
+    Fallback：driver=None 或 PID 取不到時，至少用 QueryFullProcessImageNameW 過濾
+    exe 必須是 chrome.exe，避免抓到 VSCode（Code.exe）。
 
     重要：**不能無條件呼叫 ShowWindow(SW_RESTORE)**——SW_RESTORE 在已最大化視窗
     上會把它縮成普通大小！只有 IsIconic(hwnd)=true（最小化）時才用 SW_SHOWMAXIMIZED
@@ -241,20 +329,53 @@ def _bring_chrome_to_foreground():
         import ctypes
         from ctypes import wintypes
         user32 = ctypes.WinDLL("user32", use_last_error=True)
+        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        kernel32.OpenProcess.argtypes = [wintypes.DWORD, wintypes.BOOL, wintypes.DWORD]
+        kernel32.OpenProcess.restype = wintypes.HANDLE
+        kernel32.QueryFullProcessImageNameW.argtypes = [
+            wintypes.HANDLE, wintypes.DWORD, wintypes.LPWSTR, ctypes.POINTER(wintypes.DWORD)
+        ]
+        kernel32.QueryFullProcessImageNameW.restype = wintypes.BOOL
+        kernel32.CloseHandle.argtypes = [wintypes.HANDLE]
+
         EnumWindowsProc = ctypes.WINFUNCTYPE(ctypes.c_bool, wintypes.HWND, wintypes.LPARAM)
         chrome_hwnd = [0]
+        selenium_pids = _get_selenium_chrome_pids(driver)
+        PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
+
+        def _exe_name(pid):
+            h = kernel32.OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, False, pid)
+            if not h:
+                return None
+            try:
+                buf = ctypes.create_unicode_buffer(260)
+                size = wintypes.DWORD(260)
+                if kernel32.QueryFullProcessImageNameW(h, 0, buf, ctypes.byref(size)):
+                    return buf.value.rsplit("\\", 1)[-1].lower()
+            finally:
+                kernel32.CloseHandle(h)
+            return None
 
         def _cb(hwnd, _):
             buf = ctypes.create_unicode_buffer(256)
             user32.GetClassNameW(hwnd, buf, 256)
-            if buf.value == "Chrome_WidgetWin_1" and user32.IsWindowVisible(hwnd):
-                chrome_hwnd[0] = hwnd
-                return False
-            return True
+            if buf.value != "Chrome_WidgetWin_1" or not user32.IsWindowVisible(hwnd):
+                return True
+            pid = wintypes.DWORD()
+            user32.GetWindowThreadProcessId(hwnd, ctypes.byref(pid))
+            # 有 selenium_pids 時嚴格比對；沒有時 fallback 用 exe 名過濾 VSCode/Electron
+            if selenium_pids:
+                if pid.value not in selenium_pids:
+                    return True
+            else:
+                if _exe_name(pid.value) != "chrome.exe":
+                    return True
+            chrome_hwnd[0] = hwnd
+            return False
 
         user32.EnumWindows(EnumWindowsProc(_cb), 0)
         if not chrome_hwnd[0]:
-            print("      [WARN] 找不到 Chrome 視窗，pyautogui 點擊可能落在別處")
+            print("      [WARN] 找不到 Selenium Chrome 視窗，pyautogui 點擊可能落在別處")
             return False
 
         # SetForegroundWindow 在非前景程序呼叫會失敗，先按 Alt 取得權限
@@ -272,19 +393,24 @@ def _bring_chrome_to_foreground():
         return False
 
 
-def _click_chrome_allow_button():
+def _click_chrome_allow_button(driver=None):
     """點擊 Chrome 站台權限對話框「允許」按鈕（固定螢幕座標 (322, 197)）。
     對話框錨點為 URL bar 左下；Chrome 授權後記在 profile 內，下次同 origin 不再跳。
 
+    參數：
+        driver: Selenium WebDriver，用於辨識正確的 Selenium Chrome PID。若為 None
+                則 fallback 用 exe 名過濾（避免抓到 VSCode），但可能會抓到使用者
+                個人 Chrome 視窗。建議盡量傳入。
+
     流程：
-    1. 把 Chrome 拉到最上層（_bring_chrome_to_foreground），否則 pyautogui 在
-       click_document 階段（Chrome 已失焦）會把點擊送到 VSCode/PowerShell 視窗
+    1. 把 Selenium Chrome 拉到最上層（_bring_chrome_to_foreground）。**單純比對
+       class `Chrome_WidgetWin_1` 不夠** — VSCode/Slack/Electron app 同樣是這個
+       class，會誤抓導致 VSCode 蓋過公文網頁。傳 driver 進去過濾 PID 才正確。
     2. **先檢查 (322, 197) 像素是否為允許按鈕的藍底色再決定要不要點**。授權後
-       對話框不再跳，那個座標可能是分頁列/網頁內容/工具列，盲點會亂點到其他
-       東西（之前出現的「鼠標亂點」bug）。Chrome 允許按鈕底色約 #1A73E8，用
-       r<80 且 80<g<180 且 b>200 判斷藍色。
+       對話框不再跳，那個座標當下可能是分頁列/網頁內容/工具列，盲點會亂點到其他
+       東西。Chrome 允許按鈕底色約 #1A73E8，用 r<80 且 80<g<180 且 b>200 判斷藍色。
     """
-    _bring_chrome_to_foreground()
+    _bring_chrome_to_foreground(driver)
     time.sleep(0.5)
     try:
         r, g, b = pyautogui.pixel(322, 197)
@@ -356,7 +482,7 @@ def login_taipeion_selenium(return_driver=False):
         pass
 
     print("[3/6] 預先點 Chrome 站台權限對話框「允許」按鈕（HiCOS 元件需要存取裝置）...")
-    _click_chrome_allow_button()
+    _click_chrome_allow_button(driver)
 
     print("[4/6] 點選『自然人憑證』分頁...")
     if not _js_click(driver, CERT_TAB_XPATHS, "自然人憑證分頁"):

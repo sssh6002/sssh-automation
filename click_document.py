@@ -172,7 +172,10 @@ def click_document(driver):
     # 記在 profile 內，下次不再跳，動作冪等（沒對話框時點空地也無傷）。
     print("[click_document] 點 Chrome 站台權限對話框「允許」按鈕（edoc 公文系統需要存取本地簽章元件）...")
     from taipeion_login_selenium import _click_chrome_allow_button
-    _click_chrome_allow_button()
+    # 傳入 driver — _click_chrome_allow_button 內 _bring_chrome_to_foreground 要靠
+    # driver.service.process.pid 走 process tree 過濾出 Selenium 控制的 Chrome；
+    # 不傳的話會誤抓 VSCode（Electron app，class 同為 Chrome_WidgetWin_1）。
+    _click_chrome_allow_button(driver)
 
     # 允許按掉後讓頁面收尾
     time.sleep(1.5)
