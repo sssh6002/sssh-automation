@@ -293,6 +293,58 @@ def _click_pending_signoff(driver, timeout=10):
     return _click_sidebar_item(driver, "待簽收", timeout=timeout)
 
 
+def _switch_to_frame_with_xpath(driver, target_xpath, label, timeout=15):
+    """切到含 target_xpath 元素的 frame。Generic 版，給各階段（簽收、承辦中、
+    受會案件、待結案等）共用。
+
+    edoc 公文系統採 frame-based 排版：sidebar 在主文件，內容區在名為 `dTreeContent`
+    的 iframe。點 sidebar item 後 frame 內容會切換，但主文件 URL 不變；要操作
+    frame 內元素必須先 `driver.switch_to.frame(...)`。
+
+    策略：先試 name=dTreeContent（最常見），不行就遍歷所有 iframe/frame 找含
+    target_xpath 元素的那個。每輪等 0.5s 直到 timeout。
+
+    label: 用於 print 訊息，例如「簽收按鈕」/「公文文號表頭」。
+    成功 → driver 焦點留在正確 frame，回 True；失敗 → 切回 default_content，回 False。
+
+    呼叫端要自己包 diagnostic（_switch_to_signoff_frame 有大型 dump，本函式只
+    回 False，呼叫端決定要不要再印更多）。
+    """
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        driver.switch_to.default_content()
+        try:
+            frame = driver.find_element(By.NAME, "dTreeContent")
+            driver.switch_to.frame(frame)
+            if driver.find_elements(By.XPATH, target_xpath):
+                print(f"      OK：切到 frame name='dTreeContent' 且找到「{label}」")
+                return True
+            driver.switch_to.default_content()
+        except Exception:
+            driver.switch_to.default_content()
+
+        try:
+            iframes = driver.find_elements(By.XPATH, "//iframe | //frame")
+            for ifr in iframes:
+                try:
+                    driver.switch_to.default_content()
+                    driver.switch_to.frame(ifr)
+                    if driver.find_elements(By.XPATH, target_xpath):
+                        name = ifr.get_attribute("name") or ifr.get_attribute("id") or "<unnamed>"
+                        print(f"      OK：切到 frame {name} 且找到「{label}」")
+                        return True
+                except Exception:
+                    continue
+        except Exception:
+            pass
+
+        driver.switch_to.default_content()
+        time.sleep(0.5)
+
+    driver.switch_to.default_content()
+    return False
+
+
 def _switch_to_signoff_frame(driver, timeout=15):
     """切換 driver 焦點到含「簽收」內容的 frame。
 
@@ -309,10 +361,9 @@ def _switch_to_signoff_frame(driver, timeout=15):
 
     成功 → driver 焦點留在正確 frame，回 True；失敗 → 切回 default_content，回 False。
     """
-    deadline = time.time() + timeout
-    # 找「簽收」按鈕。實測按鈕是 <input value="簽收">，但 <input> 沒有 textContent，
-    # normalize-space() 永遠空字串，所以必須用 @value='簽收' 才命中。同時也找
-    # text 為「簽收」的元素（排除「待簽收」等前綴詞）做 fallback。
+    # 切 frame 邏輯共用 _switch_to_frame_with_xpath；diagnostic 在這保留專屬版本
+    # （因為「簽收」失敗時要 dump 大量 button-like 元素 + body innerText，是這個
+    # 階段獨有的細節）
     target_xpath = (
         "//input[@value='簽收'] "
         "| //*[@value='簽收'] "
@@ -321,40 +372,9 @@ def _switch_to_signoff_frame(driver, timeout=15):
         "and not(contains(normalize-space(), '對方未簽收')) "
         "and not(contains(normalize-space(), '未簽收'))]"
     )
+    if _switch_to_frame_with_xpath(driver, target_xpath, "簽收按鈕", timeout=timeout):
+        return True
 
-    while time.time() < deadline:
-        # 試 name=dTreeContent
-        driver.switch_to.default_content()
-        try:
-            frame = driver.find_element(By.NAME, "dTreeContent")
-            driver.switch_to.frame(frame)
-            if driver.find_elements(By.XPATH, target_xpath):
-                print("      OK：切換到 frame name='dTreeContent' 且找到「簽收」按鈕")
-                return True
-            driver.switch_to.default_content()
-        except Exception:
-            driver.switch_to.default_content()
-
-        # Fallback：遍歷所有 iframe/frame
-        try:
-            iframes = driver.find_elements(By.XPATH, "//iframe | //frame")
-            for ifr in iframes:
-                try:
-                    driver.switch_to.default_content()
-                    driver.switch_to.frame(ifr)
-                    if driver.find_elements(By.XPATH, target_xpath):
-                        name = ifr.get_attribute("name") or ifr.get_attribute("id") or "<unnamed>"
-                        print(f"      OK：切換到 frame {name} 且找到「簽收」按鈕")
-                        return True
-                except Exception:
-                    continue
-        except Exception:
-            pass
-
-        driver.switch_to.default_content()
-        time.sleep(0.5)
-
-    driver.switch_to.default_content()
     print(f"[ERROR] 等 {timeout}s 仍找不到含「簽收」按鈕的 frame，診斷：")
     try:
         iframes = driver.find_elements(By.XPATH, "//iframe | //frame")
@@ -680,6 +700,234 @@ def _click_signoff_button(driver, timeout=10):
     return False
 
 
+def _click_first_document_in_pending(driver, timeout=15):
+    """點承辦中清單最上方的公文（公文文號 column 第一筆連結）。
+
+    edoc 承辦中頁顯示一個表格，欄位序號/簽核/收文/狀別/速別/公文文號/送件時間/...
+    每列「公文文號」欄是藍色超連結文字（例如 MWAA1156004874），點下去開公文內容。
+    本函式定位該 link 並點。
+
+    策略（每個 candidate 命中後都做 text verify：>=8 字、A-Z/0-9 混合）：
+    1. 主：<a> 元素的 textContent 符合 `^[A-Z][A-Z0-9]*\\d{4,}$`
+    2. Fallback 1：任何可見元素（a/span/td/div/input/button）的 textContent 或
+       value 符合 pattern。實測命中 — MWAA1156004874 不是 <a>，而是其他 tag
+       做 link 樣式偽裝。
+    3. Fallback 2：JS column-index — 找含「公文文號」th 的 column，往對應 td 內
+       找含 pattern 的子元素。萬一 text pattern 不適用時兜底。
+    4. JS click 繞遮罩（同 _click_sidebar_item 套路）。
+    5. 全部失敗 → diagnostic dump：含「公文文號」table 第一筆 tr outerHTML、frame
+       內所有可見 a 的 text/href、含公文號 pattern 的葉子元素 tag+outerHTML、
+       body innerText 前 1500 字 — 看 MWAA 實際是什麼 tag、結構。
+
+    回 True 表示已點到，False 表示沒找到（呼叫端應改手動處理）。
+    """
+    deadline = time.time() + timeout
+    target = None
+    strategy = None
+
+    def _looks_like_doc_no(text):
+        # 公文號特徵：>=8 字、全 A-Z/0-9、字母+數字混合
+        if not text or len(text) < 8:
+            return False
+        if not all(ord(c) < 128 and (c.isupper() or c.isdigit()) for c in text):
+            return False
+        return any(c.isalpha() for c in text) and any(c.isdigit() for c in text)
+
+    # 主策略：text pattern in <a>
+    while time.time() < deadline:
+        try:
+            target = driver.execute_script("""
+                var anchors = document.querySelectorAll('a');
+                var pat = /^[A-Z][A-Z0-9]*\\d{4,}$/;
+                for (var i = 0; i < anchors.length; i++) {
+                    var a = anchors[i];
+                    var text = (a.textContent || '').trim();
+                    if (text.length < 8) continue;
+                    if (!pat.test(text)) continue;
+                    if (a.offsetParent === null) continue;
+                    return a;
+                }
+                return null;
+            """)
+            if target:
+                strategy = "text pattern (a)"
+                break
+        except Exception as e:
+            print(f"      x  JS text-pattern (a) find 例外：{type(e).__name__}: {e}")
+        time.sleep(0.5)
+
+    # Fallback 1：text pattern in any element — MWAA 可能不是 <a>，而是 <span>/
+    # <input>/<td> 等做成 link 樣式的元素。掃所有元素的 textContent 或 value。
+    if not target:
+        print("      x  <a> 內找不到公文號，掃所有元素 textContent / value...")
+        try:
+            target = driver.execute_script("""
+                var all = document.querySelectorAll('a, span, td, div, input, button');
+                var pat = /^[A-Z][A-Z0-9]*\\d{4,}$/;
+                for (var i = 0; i < all.length; i++) {
+                    var el = all[i];
+                    if (el.offsetParent === null) continue;
+                    var text;
+                    if (el.tagName === 'INPUT') {
+                        text = (el.value || '').trim();
+                    } else {
+                        text = (el.textContent || '').trim();
+                    }
+                    if (text.length < 8) continue;
+                    if (!pat.test(text)) continue;
+                    // 葉子節點優先（避免命中包含同 text 的外殼 div / td）
+                    var hasSameTextChild = false;
+                    var kids = el.querySelectorAll('*');
+                    for (var k = 0; k < kids.length; k++) {
+                        var ct = (kids[k].textContent || kids[k].value || '').trim();
+                        if (ct === text) { hasSameTextChild = true; break; }
+                    }
+                    if (hasSameTextChild) continue;
+                    return el;
+                }
+                return null;
+            """)
+            if target:
+                strategy = "text pattern (any element)"
+        except Exception as e:
+            print(f"      x  JS text-pattern (any) find 例外：{type(e).__name__}: {e}")
+
+    # Fallback 2：JS column-index，cell 內找含公文號 pattern 的子元素
+    if not target:
+        print("      x  text pattern 全部沒命中，試 column-index fallback...")
+        try:
+            target = driver.execute_script("""
+                var ths = document.querySelectorAll('th');
+                for (var i = 0; i < ths.length; i++) {
+                    var thText = (ths[i].textContent || '').trim();
+                    if (thText.indexOf('公文文號') === -1) continue;
+                    var headerRow = ths[i].parentElement;
+                    if (!headerRow) continue;
+                    var idx = -1;
+                    for (var j = 0; j < headerRow.children.length; j++) {
+                        if (headerRow.children[j] === ths[i]) { idx = j; break; }
+                    }
+                    if (idx === -1) continue;
+                    var table = ths[i].closest('table');
+                    if (!table) continue;
+                    var rows = table.querySelectorAll('tbody tr');
+                    var pat = /^[A-Z][A-Z0-9]*\\d{4,}$/;
+                    for (var k = 0; k < rows.length; k++) {
+                        var cells = rows[k].children;
+                        if (idx >= cells.length) continue;
+                        var cell = cells[idx];
+                        if (cell.tagName !== 'TD') continue;
+                        var kids = cell.querySelectorAll('*');
+                        for (var m = 0; m < kids.length; m++) {
+                            var ck = kids[m];
+                            if (ck.offsetParent === null) continue;
+                            var ckt = (ck.textContent || ck.value || '').trim();
+                            if (pat.test(ckt)) return ck;
+                        }
+                        var ct = (cell.textContent || '').trim();
+                        if (pat.test(ct)) return cell;
+                    }
+                }
+                return null;
+            """)
+            if target:
+                strategy = "column-index"
+        except Exception as e:
+            print(f"      x  JS column-index find 例外：{type(e).__name__}: {e}")
+
+    # 命中後 verify + click
+    if target:
+        try:
+            txt = driver.execute_script(
+                "return (arguments[0].textContent || arguments[0].value || '').trim();",
+                target) or ""
+            if not _looks_like_doc_no(txt):
+                print(f"      x  {strategy} 找到的 text「{txt}」不像公文號，拒絕點。")
+                target = None
+            else:
+                driver.execute_script(
+                    "arguments[0].scrollIntoView({block:'center'}); arguments[0].click();", target)
+                print(f"      OK：點到承辦中最上方公文「{txt}」（{strategy}）")
+                return True
+        except Exception as e:
+            print(f"      x  click 公文號失敗：{type(e).__name__}: {e}")
+            target = None
+
+    # 全部失敗 → diagnostic（含所有可見 a 與含公文號 pattern 的葉子元素，看 MWAA
+    # 實際是什麼 tag、structure）
+    print("[ERROR] 找不到承辦中最上方公文連結。診斷：")
+    try:
+        ths = driver.find_elements(By.XPATH, "//th[contains(normalize-space(), '公文文號')]")
+        print(f"      頁面含「公文文號」表頭 th = {len(ths)} 個")
+        tables = driver.find_elements(
+            By.XPATH, "//table[.//th[contains(normalize-space(), '公文文號')]]")
+        print(f"      含「公文文號」表頭的 table = {len(tables)} 個")
+        for i, t in enumerate(tables[:2]):
+            try:
+                rows = t.find_elements(By.XPATH, ".//tbody//tr")
+                print(f"      table[{i+1}] tbody tr = {len(rows)} 個")
+                if rows:
+                    outer = driver.execute_script(
+                        "return arguments[0].outerHTML;", rows[0]) or ""
+                    print(f"      table[{i+1}] 第一筆 tr outerHTML (前 800 字)：{outer[:800]}")
+            except Exception as e:
+                print(f"      table[{i+1}] dump 失敗：{type(e).__name__}: {e}")
+
+        anchors_info = driver.execute_script("""
+            var anchors = document.querySelectorAll('a');
+            var out = [];
+            for (var i = 0; i < anchors.length && out.length < 30; i++) {
+                var a = anchors[i];
+                if (a.offsetParent === null) continue;
+                out.push({
+                    text: (a.textContent || '').trim().substring(0, 60),
+                    href: (a.getAttribute('href') || '').substring(0, 80),
+                });
+            }
+            return out;
+        """) or []
+        print(f"      frame 內可見 a 元素（前 {len(anchors_info)} 個）：")
+        for i, info in enumerate(anchors_info):
+            print(f"      [a{i+1}] text=「{info.get('text')}」 href={info.get('href')}")
+
+        doc_like_hits = driver.execute_script("""
+            var all = document.querySelectorAll('*');
+            var pat = /[A-Z][A-Z0-9]*\\d{4,}/;
+            var out = [];
+            for (var i = 0; i < all.length && out.length < 20; i++) {
+                var el = all[i];
+                if (el.offsetParent === null) continue;
+                var text = (el.textContent || el.value || '').trim();
+                if (!pat.test(text)) continue;
+                var hasSameTextChild = false;
+                var kids = el.querySelectorAll('*');
+                for (var k = 0; k < kids.length; k++) {
+                    var ct = (kids[k].textContent || kids[k].value || '').trim();
+                    if (ct === text) { hasSameTextChild = true; break; }
+                }
+                if (hasSameTextChild) continue;
+                out.push({
+                    tag: el.tagName,
+                    text: text.substring(0, 60),
+                    outer: el.outerHTML.substring(0, 300),
+                });
+            }
+            return out;
+        """) or []
+        print(f"      含公文號 pattern 的葉子元素（{len(doc_like_hits)} 個）：")
+        for i, h in enumerate(doc_like_hits):
+            print(f"      [hit{i+1}] tag={h.get('tag')} text=「{h.get('text')}」")
+            print(f"             outer={h.get('outer')}")
+
+        body_preview = driver.execute_script(
+            "return document.body ? document.body.innerText.substring(0, 1500) : '';"
+        ) or ""
+        print(f"      body innerText (前 1500 字)：{body_preview!r}")
+    except Exception as e:
+        print(f"      diagnostic 失敗：{type(e).__name__}: {e}")
+    return False
+
+
 def _click_urgent_message(driver, timeout=10):
     """點選 edoc 公文首頁的「催辦訊息」badge。
 
@@ -853,14 +1101,49 @@ def _run_sidebar_cascade(driver):
 
 
 def pending_doc(driver):
-    """承辦中公文處理流程。第一版只印 TODO，後續擴充實際的承辦動作。
+    """承辦中公文處理流程。第一階段：點承辦中清單最上方的公文（公文文號 column
+    第一筆 link）。後續（檢視內容、簽辦、送件等）依 DOM 結構再擴充。
 
-    呼叫時機：點入 sidebar「承辦中」menu 之後。driver 此時的內容區（dTreeContent
-    iframe）會顯示承辦中清單，本函式負責後續流程。
+    呼叫時機：cascade 點完 sidebar「承辦中」之後（driver 此時 focus 在主文件，
+    內容區 dTreeContent iframe 內已載入承辦中清單）。
+
+    流程：
+    1. 切到含「公文文號」表頭的 frame（通常是 dTreeContent）
+    2. 點公文文號 column 第一筆連結
+    3. sleep 3s 等系統回應，印導航後的 URL/title 觀察狀態
+    4. 切回主文件供後續操作
+
+    回 True 表示順利點到、False 表示中途失敗（呼叫端會收到，但目前 cascade 不
+    依賴回傳值決定下一步）。
     """
-    _ = driver  # 保留 signature 供後續實作（切 frame、讀清單、逐筆處理）使用
-    print("[pending_doc] 承辦中公文處理流程開始（尚未實作）")
-    print("[pending_doc] TODO: 切到內容 frame、讀承辦中清單、逐筆處理（檢視/簽辦/送件）")
+    print("[pending_doc] 承辦中公文處理流程開始")
+    print("[pending_doc] 切到內容 frame（找「公文文號」表頭）...")
+    target_xpath = "//th[contains(normalize-space(), '公文文號')]"
+    if not _switch_to_frame_with_xpath(driver, target_xpath, "公文文號表頭"):
+        print("[pending_doc] 切不到含承辦中清單的 frame，請手動處理。")
+        return False
+
+    print("[pending_doc] 點承辦中最上方的公文...")
+    if not _click_first_document_in_pending(driver):
+        print("[pending_doc] 點公文失敗，請手動處理。")
+        driver.switch_to.default_content()
+        return False
+
+    # 點公文後系統可能就地 frame 切到公文內容、或開新分頁、或彈 modal。
+    # 給足夠時間觀察，再 print 主文件狀態。driver.current_url 永遠是主文件 URL，
+    # 不受 frame switch 影響 — 若 frame 內容換了但主文件沒動，URL 不會變。
+    time.sleep(3)
+    try:
+        print(f"[pending_doc] 點開後 URL：{driver.current_url}")
+        print(f"[pending_doc] 點開後標題：{driver.title}")
+        handles = driver.window_handles
+        if len(handles) > 1:
+            print(f"[pending_doc] 偵測到 {len(handles)} 個 window — 公文內容可能開在新分頁")
+    except Exception as e:
+        print(f"[pending_doc] 讀狀態失敗：{type(e).__name__}: {e}")
+
+    # 切回主文件供後續可能的操作
+    driver.switch_to.default_content()
     return True
 
 
