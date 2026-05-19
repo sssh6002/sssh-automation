@@ -223,27 +223,49 @@ def _build_chrome_options():
     各旗標的詳細理由見對應的 inline 註解。
     """
     options = Options()
+    # page_load_strategy='eager'：等 DOMContentLoaded 就 return，不等 onload。
+    # 必要：點公文方塊後 edoc 新分頁會跳 Chrome 站台權限對話框，會讓頁面 onload
+    # 永遠不觸發；預設 strategy='normal' 下任何 driver.xxx 指令（window_handles、
+    # current_url 等）都會卡在 pending pageload 等到 onload 才返回，整個 driver
+    # 鎖死。eager 只等 DOMContentLoaded，不受對話框影響。
     options.page_load_strategy = "eager"
     options.add_argument(f"--user-data-dir={USER_DATA_DIR}")
     options.add_argument(f"--profile-directory={PROFILE_DIR}")
     options.add_argument("--start-maximized")
     options.add_argument("--disable-blink-features=AutomationControlled")
+    # 壓掉 taskkill 後啟動 Chrome 會跳的「未正確關閉 / 是否還原網頁」泡泡 + 對話框
     options.add_argument("--disable-session-crashed-bubble")
     options.add_argument("--hide-crash-restore-bubble")
     options.add_argument("--no-first-run")
     options.add_argument("--no-default-browser-check")
     options.add_argument("--restore-last-session=false")
+    # 關閉 Chrome Local Network Access (LNA) + Private Network Access (PNA) 阻擋：
+    # edoc.gov.taipei (公開來源) 會 fetch 兩個本地簽章元件：
+    #   - https://127.0.0.1:56420/56520/56620 (TCGServiSign by Changingtec)
+    #   - http://127.0.0.1:16888 (公文系統 KdApp javaw 本地元件，HTTP not HTTPS)
+    # Chrome 142+ 把 LNA 預設啟用，console 印
+    #   "blocked by CORS policy: Permission was denied for this request to access
+    #    the `loopback` address space"
+    # — 這是 LNA 訊息（不是 PNA）。LNA 比 PNA 嚴 — 完全不准 fetch loopback 除非
+    # profile 授權過。個人 Chrome Profile 2 早授權，Selenium 全新 profile 沒。
+    # 同時關掉 PNA 三個 feature 當保險；只影響 fetch loopback/private network，
+    # 不動一般網頁安全性。
     options.add_argument(
         "--disable-features=LocalNetworkAccessChecks,"
         "BlockInsecurePrivateNetworkRequests,"
         "PrivateNetworkAccessRespectPreflightResults,"
         "PrivateNetworkAccessSendPreflights"
     )
+    # 允許 HTTPS 頁面 fetch http://127.0.0.1:16888 (公文 KdApp 元件是 HTTP)；
+    # 不加會被 mixed content 擋（已在 console log 看到 Mixed Content 警告）。
     options.add_argument("--allow-running-insecure-content")
     options.add_experimental_option("detach", True)
     options.add_experimental_option("excludeSwitches", ["enable-automation", "enable-logging"])
     options.add_experimental_option("useAutomationExtension", False)
+    # 自動接受所有 JS dialog（alert/confirm/prompt）— 公文系統點方塊可能跳 JS confirm，
+    # 沒處理會讓 Selenium 永遠卡在 unhandled prompt 狀態，後續 driver.xxx 全部 hang。
     options.set_capability("unhandledPromptBehavior", "accept")
+    # 開啟瀏覽器 console / 網路日誌，下次出簽章元件、CORS、PNA 問題可直接看 log
     options.set_capability("goog:loggingPrefs", {"browser": "ALL"})
     return options
 
