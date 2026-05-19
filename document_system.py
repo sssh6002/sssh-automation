@@ -59,14 +59,28 @@ SELECT_ALL_CHECKBOX_XPATHS = [
     "(//input[@type='checkbox'])[1]",
 ]
 
-# 表格上方亮青色「簽收」按鈕 XPath 候選。需精確匹配「簽收」避免誤點旁邊的「退文」。
+# 表格上方亮青色「簽收」按鈕 XPath 候選。
+# 實測 (2026-05-19 dTreeContent dump)：edoc 的簽收按鈕是
+#   <input value="簽收" class="toolbar_default list-btn-success">
+# （type 屬性沒寫或不是 button/submit），且 <input> 沒有 textContent，所以
+# normalize-space() 找不到 — 必須用 @value='簽收' 才命中。
 SIGNOFF_BUTTON_XPATHS = [
+    "//input[@value='簽收']",                                # ← 實測命中 (Important)
+    "//*[@value='簽收']",                                    # 其他 form element 也用 value
     "//button[normalize-space()='簽收']",
     "//a[normalize-space()='簽收']",
     "//input[@type='button' and @value='簽收']",
+    "//input[@type='submit' and @value='簽收']",
+    "//*[@alt='簽收']",                                       # 若按鈕是 <img alt="簽收">
     "//*[normalize-space()='簽收' and (self::button or @role='button')]",
     "//*[normalize-space()='簽收']/ancestor::button[1]",
     "//*[normalize-space()='簽收']/ancestor::a[1]",
+    "//span[normalize-space()='簽收']",
+    "//div[normalize-space()='簽收']",
+    "//*[normalize-space()='簽收' "
+    "and not(contains(normalize-space(), '待簽收')) "
+    "and not(contains(normalize-space(), '對方未簽收')) "
+    "and not(contains(normalize-space(), '未簽收'))]",
 ]
 
 
@@ -265,6 +279,179 @@ def _click_pending_signoff(driver, timeout=10):
     return False
 
 
+def _switch_to_signoff_frame(driver, timeout=15):
+    """切換 driver 焦點到含「簽收」內容的 frame。
+
+    edoc 公文系統採 frame-based 排版：左側 sidebar 在主文件，內容區（表格、checkbox、
+    簽收按鈕）在名為 `dTreeContent` 的 iframe 裡。sidebar menu item 的 onclick 帶
+    `target="dTreeContent"`，點完 frame 內容更新但主文件 URL 不變。
+
+    操作 checkbox / 簽收按鈕前必須先呼叫 `driver.switch_to.frame(...)`，否則 XPath
+    全部找不到（這就是先前「2/2 checkbox 勾選成功」假象的成因：那 2 個 checkbox
+    是主文件其他地方的，不是表格內可見的那兩個）。
+
+    策略：先試 name=dTreeContent，再 fallback 遍歷所有 iframe/frame 找「簽收」字串
+    （排除「待簽收」避免誤判 sidebar）。等至多 timeout 秒讓 frame 內容載入。
+
+    成功 → driver 焦點留在正確 frame，回 True；失敗 → 切回 default_content，回 False。
+    """
+    deadline = time.time() + timeout
+    # 找「簽收」按鈕。實測按鈕是 <input value="簽收">，但 <input> 沒有 textContent，
+    # normalize-space() 永遠空字串，所以必須用 @value='簽收' 才命中。同時也找
+    # text 為「簽收」的元素（排除「待簽收」等前綴詞）做 fallback。
+    target_xpath = (
+        "//input[@value='簽收'] "
+        "| //*[@value='簽收'] "
+        "| //*[normalize-space()='簽收' "
+        "and not(contains(normalize-space(), '待簽收')) "
+        "and not(contains(normalize-space(), '對方未簽收')) "
+        "and not(contains(normalize-space(), '未簽收'))]"
+    )
+
+    while time.time() < deadline:
+        # 試 name=dTreeContent
+        driver.switch_to.default_content()
+        try:
+            frame = driver.find_element(By.NAME, "dTreeContent")
+            driver.switch_to.frame(frame)
+            if driver.find_elements(By.XPATH, target_xpath):
+                print("      OK：切換到 frame name='dTreeContent' 且找到「簽收」按鈕")
+                return True
+            driver.switch_to.default_content()
+        except Exception:
+            driver.switch_to.default_content()
+
+        # Fallback：遍歷所有 iframe/frame
+        try:
+            iframes = driver.find_elements(By.XPATH, "//iframe | //frame")
+            for ifr in iframes:
+                try:
+                    driver.switch_to.default_content()
+                    driver.switch_to.frame(ifr)
+                    if driver.find_elements(By.XPATH, target_xpath):
+                        name = ifr.get_attribute("name") or ifr.get_attribute("id") or "<unnamed>"
+                        print(f"      OK：切換到 frame {name} 且找到「簽收」按鈕")
+                        return True
+                except Exception:
+                    continue
+        except Exception:
+            pass
+
+        driver.switch_to.default_content()
+        time.sleep(0.5)
+
+    driver.switch_to.default_content()
+    print(f"[ERROR] 等 {timeout}s 仍找不到含「簽收」按鈕的 frame，診斷：")
+    try:
+        iframes = driver.find_elements(By.XPATH, "//iframe | //frame")
+        # 先在 outer doc 把每個 iframe 的 metadata 抓完（避免 switch 後 stale）
+        frame_meta = []
+        for i, ifr in enumerate(iframes):
+            try:
+                frame_meta.append({
+                    "idx": i,
+                    "el": ifr,
+                    "tag": ifr.tag_name,
+                    "name": ifr.get_attribute("name") or "",
+                    "id": ifr.get_attribute("id") or "",
+                    "src": ifr.get_attribute("src") or "",
+                })
+            except Exception as e:
+                frame_meta.append({"idx": i, "el": ifr, "err": str(e)})
+
+        print(f"      主文件有 {len(iframes)} 個 frame/iframe：")
+        for m in frame_meta:
+            if "err" in m:
+                print(f"      [{m['idx']+1}] metadata 抓不到：{m['err']}")
+                continue
+            print(f"      [{m['idx']+1}] <{m['tag']}> name='{m['name']}' id='{m['id']}'")
+            print(f"           src={m['src'][:200]}")
+
+        # 進每個 iframe 看內容
+        for m in frame_meta:
+            if "err" in m:
+                continue
+            label = m['name'] or m['id'] or f"#{m['idx']+1}"
+            try:
+                driver.switch_to.default_content()
+                driver.switch_to.frame(m['el'])
+                # 在 frame 內讀 URL、title、body preview、「簽收」相關元素
+                inner_url = driver.execute_script("return document.URL;") or "?"
+                inner_title = driver.execute_script("return document.title;") or "?"
+                body_preview = driver.execute_script(
+                    "return document.body ? document.body.innerText.substring(0, 200) : 'no body';"
+                ) or ""
+                hits = driver.find_elements(By.XPATH, "//*[contains(normalize-space(), '簽收')]")
+                btn_hits = driver.find_elements(
+                    By.XPATH,
+                    "//*[normalize-space()='簽收' "
+                    "and not(contains(normalize-space(), '待簽收')) "
+                    "and not(contains(normalize-space(), '對方未簽收')) "
+                    "and not(contains(normalize-space(), '未簽收'))]"
+                )
+                print(f"      [{label}] inner_url={inner_url[:120]}")
+                print(f"           inner_title={inner_title}")
+                print(f"           body_preview={body_preview!r}")
+                print(f"           「簽收」字串元素 = {len(hits)}，純「簽收」按鈕 = {len(btn_hits)}")
+                for j, b in enumerate(btn_hits[:3]):
+                    try:
+                        outer = driver.execute_script(
+                            "return arguments[0].outerHTML;", b) or ""
+                        print(f"           [btn{j+1}] {outer[:200]}")
+                    except Exception:
+                        pass
+                # 在 dTreeContent (有 row data 的 frame) 內擴大 dump：列 button-like 元素
+                if label == "dTreeContent" or "dTreeContent" in (m.get('id') or ""):
+                    print(f"      [{label}] 額外診斷 — 列 button-like 元素：")
+                    button_likes = driver.find_elements(
+                        By.XPATH,
+                        "//button | //a[@class] | //input[@type='button' or @type='submit' or @type='image'] "
+                        "| //*[@role='button'] | //img[@alt and not(@alt='')] "
+                        "| //*[contains(@class, 'btn')] | //*[contains(@class, 'button')]"
+                    )
+                    # 去重 (Selenium 可能有重複 reference)
+                    seen_ids = set()
+                    unique_btns = []
+                    for bl in button_likes:
+                        if id(bl) not in seen_ids:
+                            seen_ids.add(id(bl))
+                            unique_btns.append(bl)
+                    print(f"           找到 {len(unique_btns)} 個 button-like 元素")
+                    # 篩出 text/alt/value 含「簽」或在頂部的
+                    for j, bl in enumerate(unique_btns[:30]):
+                        try:
+                            info = driver.execute_script("""
+                                var el = arguments[0];
+                                return {
+                                    tag: el.tagName.toLowerCase(),
+                                    text: (el.textContent || '').trim().substring(0, 50),
+                                    alt: el.getAttribute('alt') || '',
+                                    value: el.getAttribute('value') || '',
+                                    title: el.getAttribute('title') || '',
+                                    cls: el.className || '',
+                                    visible: el.offsetWidth > 0 && el.offsetHeight > 0,
+                                };
+                            """, bl) or {}
+                            # 只列 visible + (text含簽 or alt含簽 or value含簽 or title含簽)
+                            joined = f"{info.get('text','')} {info.get('alt','')} {info.get('value','')} {info.get('title','')}"
+                            if info.get('visible') and '簽' in joined:
+                                print(f"           [bl{j+1}] <{info.get('tag')}> text=「{info.get('text')}」 alt=「{info.get('alt')}」 value=「{info.get('value')}」 title=「{info.get('title')}」 class=「{info.get('cls')[:60]}」")
+                        except Exception:
+                            pass
+                    # 也 dump body 完整 innerText (前 2000 字)
+                    full_body = driver.execute_script(
+                        "return document.body ? document.body.innerText.substring(0, 2000) : '';"
+                    ) or ""
+                    print(f"      [{label}] body innerText (前 2000 字)：")
+                    print(f"           {full_body!r}")
+            except Exception as e:
+                print(f"      [{label}] 進 frame 失敗：{type(e).__name__}: {str(e)[:150]}")
+        driver.switch_to.default_content()
+    except Exception as e:
+        print(f"      diagnostic 失敗：{type(e).__name__}: {e}")
+    return False
+
+
 def _try_check_checkbox(driver, el):
     """確保單一 checkbox 為勾選狀態，回傳是否成功（是否被真實 click event 勾起來）。
 
@@ -292,6 +479,21 @@ def _try_check_checkbox(driver, el):
         return False
 
     targets = [("input native", el, "native"), ("input JS", el, "js")]
+
+    # iCheck plugin API（最 reliable for iCheck-based UIs，例如 edoc 公文系統）。
+    # iCheck 把 input 設 opacity:0 + <ins class="iCheck-helper"> 覆蓋，handler 綁在
+    # helper 上，直接點 input 反而被 handler 把 state 改回去。用官方 jQuery API
+    # 才能正確觸發 iCheck 內部 state machine。
+    targets.append(("iCheck API", el, "icheck_api"))
+
+    # iCheck helper sibling — jQuery 不可用時的 fallback，直接點視覺覆蓋層
+    try:
+        helper = el.find_element(
+            By.XPATH, "./following-sibling::ins[contains(@class, 'iCheck-helper')]")
+        targets.append(("iCheck helper sibling", helper, "js"))
+    except Exception:
+        pass
+
     try:
         label = el.find_element(By.XPATH, "./ancestor::label[1]")
         targets.append(("label", label, "js"))
@@ -308,6 +510,18 @@ def _try_check_checkbox(driver, el):
         try:
             if method == "native":
                 target.click()
+            elif method == "icheck_api":
+                # 跑 jQuery + iCheck API；jQuery 不在或 iCheck plugin 沒載入 → return False，跳下一策略
+                ok = driver.execute_script("""
+                    var el = arguments[0];
+                    if (window.jQuery && typeof jQuery(el).iCheck === 'function') {
+                        jQuery(el).iCheck('check');
+                        return true;
+                    }
+                    return false;
+                """, target)
+                if not ok:
+                    continue
             else:
                 driver.execute_script("arguments[0].click();", target)
             time.sleep(0.2)
@@ -411,7 +625,44 @@ def _click_signoff_button(driver, timeout=10):
         except Exception as e:
             print(f"      x  「簽收」XPath {xp} 例外：{type(e).__name__}: {e}")
             continue
-    print("[ERROR] 「簽收」按鈕全部 XPath 都失敗")
+    print("[ERROR] 「簽收」按鈕全部 XPath 都失敗。診斷：頁面上含「簽收」文字的元素：")
+    try:
+        candidates = driver.find_elements(By.XPATH, "//*[contains(normalize-space(), '簽收')]")
+        # 篩掉「待簽收」(sidebar 那個 menu item, 不是按鈕)
+        candidates = [el for el in candidates if "待簽收" not in (el.text or "")]
+        # 篩掉外層包很多的 ancestor: 只留沒有後代也含「簽收」字串的「葉子」
+        leaves = []
+        for el in candidates:
+            try:
+                inner = el.find_elements(By.XPATH, ".//*[contains(normalize-space(), '簽收')]")
+                inner = [i for i in inner if "待簽收" not in (i.text or "")]
+                if not inner:
+                    leaves.append(el)
+            except Exception:
+                continue
+        print(f"      找到 {len(leaves)} 個葉子元素含「簽收」（已濾掉「待簽收」）")
+        for i, el in enumerate(leaves[:10]):
+            try:
+                info = driver.execute_script("""
+                    var el = arguments[0];
+                    var p1 = el.parentElement;
+                    var p2 = p1 ? p1.parentElement : null;
+                    return {
+                        tag: el.tagName.toLowerCase(),
+                        text: (el.textContent || '').trim().substring(0, 50),
+                        outer: el.outerHTML,
+                        parent1: p1 ? p1.outerHTML : null,
+                        parent2: p2 ? p2.outerHTML : null,
+                    };
+                """, el) or {}
+                print(f"      [{i+1}] tag=<{info.get('tag')}> text=「{info.get('text')}」")
+                print(f"           self   : {(info.get('outer') or '')[:250]}")
+                print(f"           parent1: {(info.get('parent1') or '')[:300]}")
+                print(f"           parent2: {(info.get('parent2') or '')[:400]}")
+            except Exception as e:
+                print(f"      [{i+1}] dump 失敗：{type(e).__name__}: {e}")
+    except Exception as e:
+        print(f"      diagnostic dump 失敗：{type(e).__name__}: {e}")
     return False
 
 
@@ -506,24 +757,33 @@ def process_document_system(driver):
         except Exception as e:
             print(f"[document_system] 讀狀態失敗：{type(e).__name__}: {e}")
 
-        # 待簽收清單載入後：勾全選 → 點簽收按鈕
+        # 待簽收清單載入後：先切換到內容 frame 才能找到 checkbox + 簽收按鈕
+        # （edoc 是 frame-based 排版，內容區在名為 dTreeContent 的 iframe）
         # **警告**：簽收會改變公文狀態（待簽收 → 承辦中），無 admin 介入無法復原
         print(f"[WARN] 即將自動執行：勾選 {signoff_count} 筆待簽收 + 點「簽收」按鈕")
         print(f"[WARN] 簽收會把公文從「待簽收」狀態改為「承辦中」，無法復原")
-        if not _check_select_all(driver):
+        print("[document_system] 切換到內容 frame...")
+        if not _switch_to_signoff_frame(driver):
+            print("[document_system] 切不到內容 frame，跳過簽收動作。請手動處理。")
+        elif not _check_select_all(driver):
             print("[document_system] 全選 checkbox 失敗，不執行簽收。請手動處理。")
+            driver.switch_to.default_content()
+        elif not _click_signoff_button(driver):
+            print("[document_system] 找不到「簽收」按鈕，請手動處理。")
+            driver.switch_to.default_content()
         else:
-            if not _click_signoff_button(driver):
-                print("[document_system] 找不到「簽收」按鈕，請手動處理。")
-            else:
-                # 簽收後等系統回應（可能跳 JS confirm 由 unhandledPromptBehavior=accept
-                # 自動接受、或跳轉到下一頁、或就地刷新清單）
-                time.sleep(3)
-                try:
-                    print(f"[document_system] 簽收後 URL：{driver.current_url}")
-                    print(f"[document_system] 簽收後標題：{driver.title}")
-                except Exception as e:
-                    print(f"[document_system] 讀狀態失敗：{type(e).__name__}: {e}")
+            # 簽收後等系統回應（可能跳 JS confirm 由 unhandledPromptBehavior=accept
+            # 自動接受、或跳轉到下一頁、或就地刷新清單）
+            time.sleep(3)
+            try:
+                # 注意：driver 此時還在 frame 內，current_url/title 讀的是主文件
+                # （driver.current_url 永遠是主文件 URL，不受 frame switch 影響）
+                print(f"[document_system] 簽收後 URL：{driver.current_url}")
+                print(f"[document_system] 簽收後標題：{driver.title}")
+            except Exception as e:
+                print(f"[document_system] 讀狀態失敗：{type(e).__name__}: {e}")
+            # 切回主文件，後續操作（若有）才正常
+            driver.switch_to.default_content()
 
     # TODO: 後續工作（逐筆點進公文做承辦動作、退文判斷等）在此擴充
     print("[完成] 公文系統處理流程結束。")
