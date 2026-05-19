@@ -57,7 +57,11 @@ def main():
         if driver is None:
             print("[ERROR] 登入未完成，跳過後續動作。")
         else:
-            post_login(driver)
+            # post_login (click_document_card) 回 True 表示已點進公文系統 (edoc)；
+            # 串接 document_system 進去做後續處理。
+            if post_login(driver):
+                from document_system import process_document_system
+                process_document_system(driver)
     print("-" * 40)
     print("[完成] 程式結束。")
 
