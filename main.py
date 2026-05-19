@@ -10,42 +10,15 @@ main.py
 執行後跑指定 FEATURE，結束即回到原本的 PowerShell / CMD 視窗（不再進入選單迴圈）。
 """
 
-import os
-import subprocess
 import sys
 
 sys.stdout.reconfigure(encoding='utf-8')
 
-
-def _close_selenium_chrome_only():
-    """只關閉 Selenium 相關的 chrome.exe + chromedriver.exe，不動使用者個人 Chrome。
-
-    委派給 scripts/close-profile2-chrome.ps1：該腳本用 Get-CimInstance 過濾 command line，
-    只殺帶 --user-data-dir=*Chrome-Selenium*、--remote-debugging-port 或 --test-type=webdriver
-    的程序，並先 CloseMainWindow 優雅關閉再強制終止，順帶清 profile lockfile。
-    這樣個人 Chrome 不會被強殺，下次手動打開不會跳「未正確關閉，要還原網頁嗎？」對話框。
-    """
-    script_path = os.path.join(
-        os.path.dirname(os.path.abspath(__file__)),
-        "scripts", "close-profile2-chrome.ps1",
-    )
-    if not os.path.isfile(script_path):
-        print(f"[WARN] 找不到 {script_path}，跳過 Chrome 預清理")
-        return
-    try:
-        subprocess.run(
-            ["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", script_path],
-            capture_output=True, timeout=30,
-        )
-    except Exception as e:
-        print(f"[WARN] Chrome 預清理失敗：{e}")
-
+from taipeion_login_selenium import login_taipeion_selenium, _close_selenium_chrome_only
+from taipeion_login import login_taipeion
+from click_document import click_document_card
 
 _close_selenium_chrome_only()
-
-from taipeion_login import login_taipeion
-from taipeion_login_selenium import login_taipeion_selenium
-from click_document import click_document_card
 
 # ── 功能清單 ──────────────────────────────────────────────────────────────────
 # 每新增一列：(顯示名稱, 主函式, 登入後動作 or None)

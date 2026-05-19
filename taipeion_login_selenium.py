@@ -188,6 +188,66 @@ def _wait_for_login_button(driver, max_retries=2, interval=3.0):
     return False
 
 
+def _close_selenium_chrome_only():
+    """只關閉 Selenium 相關的 chrome.exe + chromedriver.exe，不動使用者個人 Chrome。
+
+    委派給 scripts/close-profile2-chrome.ps1：該腳本用 Get-CimInstance 過濾 command line，
+    只殺帶 --user-data-dir=*Chrome-Selenium*、--remote-debugging-port 或 --test-type=webdriver
+    的程序，並先 CloseMainWindow 優雅關閉再強制終止，順帶清 profile lockfile。
+    這樣個人 Chrome 不會被強殺，下次手動打開不會跳「未正確關閉，要還原網頁嗎？」對話框。
+    """
+    import subprocess
+    script_path = os.path.join(
+        os.path.dirname(os.path.abspath(__file__)),
+        "scripts", "close-profile2-chrome.ps1",
+    )
+    if not os.path.isfile(script_path):
+        print(f"[WARN] 找不到 {script_path}，跳過 Chrome 預清理")
+        return
+    try:
+        subprocess.run(
+            ["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", script_path],
+            capture_output=True, timeout=30,
+        )
+    except Exception as e:
+        print(f"[WARN] Chrome 預清理失敗：{e}")
+
+
+def _build_chrome_options():
+    """建構 Selenium Chrome 的 Options。
+
+    所有 entry-point（main.py 走的 login 流程、document_system.py standalone 流程）
+    共用同一份 options，避免兩邊飄移後出現「main.py OK 但 document_system 連 PNA 都
+    沒關」這種詭異 bug。
+
+    各旗標的詳細理由見對應的 inline 註解。
+    """
+    options = Options()
+    options.page_load_strategy = "eager"
+    options.add_argument(f"--user-data-dir={USER_DATA_DIR}")
+    options.add_argument(f"--profile-directory={PROFILE_DIR}")
+    options.add_argument("--start-maximized")
+    options.add_argument("--disable-blink-features=AutomationControlled")
+    options.add_argument("--disable-session-crashed-bubble")
+    options.add_argument("--hide-crash-restore-bubble")
+    options.add_argument("--no-first-run")
+    options.add_argument("--no-default-browser-check")
+    options.add_argument("--restore-last-session=false")
+    options.add_argument(
+        "--disable-features=LocalNetworkAccessChecks,"
+        "BlockInsecurePrivateNetworkRequests,"
+        "PrivateNetworkAccessRespectPreflightResults,"
+        "PrivateNetworkAccessSendPreflights"
+    )
+    options.add_argument("--allow-running-insecure-content")
+    options.add_experimental_option("detach", True)
+    options.add_experimental_option("excludeSwitches", ["enable-automation", "enable-logging"])
+    options.add_experimental_option("useAutomationExtension", False)
+    options.set_capability("unhandledPromptBehavior", "accept")
+    options.set_capability("goog:loggingPrefs", {"browser": "ALL"})
+    return options
+
+
 def _read_pin():
     """從 id.txt 讀 PIN，回傳字串；檔案不存在或空白時回傳 None。"""
     if not os.path.isfile(PIN_FILE):
@@ -438,51 +498,7 @@ def login_taipeion_selenium(return_driver=False):
     if os.path.isdir(os.path.join(USER_DATA_DIR, PROFILE_DIR)):
         _mark_profile_clean_exit()
 
-    options = Options()
-    # page_load_strategy='eager'：等 DOMContentLoaded 就 return，不等 onload。
-    # 必要：點公文方塊後 edoc 新分頁會跳 Chrome 站台權限對話框，會讓頁面 onload
-    # 永遠不觸發；預設 strategy='normal' 下任何 driver.xxx 指令（window_handles、
-    # current_url 等）都會卡在 pending pageload 等到 onload 才返回，整個 driver
-    # 鎖死。eager 只等 DOMContentLoaded，不受對話框影響。
-    options.page_load_strategy = "eager"
-    options.add_argument(f"--user-data-dir={USER_DATA_DIR}")
-    options.add_argument(f"--profile-directory={PROFILE_DIR}")
-    options.add_argument("--start-maximized")
-    options.add_argument("--disable-blink-features=AutomationControlled")
-    # 壓掉 taskkill 後啟動 Chrome 會跳的「未正確關閉 / 是否還原網頁」泡泡 + 對話框
-    options.add_argument("--disable-session-crashed-bubble")
-    options.add_argument("--hide-crash-restore-bubble")
-    options.add_argument("--no-first-run")
-    options.add_argument("--no-default-browser-check")
-    options.add_argument("--restore-last-session=false")
-    # 關閉 Chrome Local Network Access (LNA) + Private Network Access (PNA) 阻擋：
-    # edoc.gov.taipei (公開來源) 會 fetch 兩個本地簽章元件：
-    #   - https://127.0.0.1:56420/56520/56620 (TCGServiSign by Changingtec)
-    #   - http://127.0.0.1:16888 (公文系統 KdApp javaw 本地元件，HTTP not HTTPS)
-    # Chrome 142+ 把 LNA 預設啟用，console 印
-    #   "blocked by CORS policy: Permission was denied for this request to access
-    #    the `loopback` address space"
-    # — 這是 LNA 訊息（不是 PNA）。LNA 比 PNA 嚴 — 完全不准 fetch loopback 除非
-    # profile 授權過。個人 Chrome Profile 2 早授權，Selenium 全新 profile 沒。
-    # 同時關掉 PNA 三個 feature 當保險；只影響 fetch loopback/private network，
-    # 不動一般網頁安全性。
-    options.add_argument(
-        "--disable-features=LocalNetworkAccessChecks,"
-        "BlockInsecurePrivateNetworkRequests,"
-        "PrivateNetworkAccessRespectPreflightResults,"
-        "PrivateNetworkAccessSendPreflights"
-    )
-    # 允許 HTTPS 頁面 fetch http://127.0.0.1:16888 (公文 KdApp 元件是 HTTP)；
-    # 不加會被 mixed content 擋（已在 console log 看到 Mixed Content 警告）。
-    options.add_argument("--allow-running-insecure-content")
-    options.add_experimental_option("detach", True)
-    options.add_experimental_option("excludeSwitches", ["enable-automation", "enable-logging"])
-    options.add_experimental_option("useAutomationExtension", False)
-    # 自動接受所有 JS dialog（alert/confirm/prompt）— 公文系統點方塊可能跳 JS confirm，
-    # 沒處理會讓 Selenium 永遠卡在 unhandled prompt 狀態，後續 driver.xxx 全部 hang。
-    options.set_capability("unhandledPromptBehavior", "accept")
-    # 開啟瀏覽器 console / 網路日誌，下次出簽章元件、CORS、PNA 問題可直接看 log
-    options.set_capability("goog:loggingPrefs", {"browser": "ALL"})
+    options = _build_chrome_options()
 
     try:
         driver = webdriver.Chrome(options=options)
