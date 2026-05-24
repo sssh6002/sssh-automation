@@ -303,19 +303,20 @@ def run_one(
 
 
 def main():
+    sys.stdout.reconfigure(encoding="utf-8")
     import argparse
     p = argparse.ArgumentParser(
-        description="doc_classifier - classify MW documents.",
+        description="doc_classifier — 對公文目錄做處置動作分類。",
     )
     p.add_argument(
         "mw_dir",
         nargs="?",
-        help="MW directory path; omit to scan ../document_download/MW*/",
+        help="MW 目錄路徑;留空則掃 ../document_download/MW*/。",
     )
     p.add_argument("--force", action="store_true",
-                   help="Re-classify even if # suggested_action already present.")
+                   help="目標 .md 已含 # suggested_action 也強制重跑。")
     p.add_argument("--no-sync", action="store_true",
-                   help="Skip collect_training.sync, only classify.")
+                   help="跳過 collect_training.sync,只跑分類。")
     args = p.parse_args()
 
     do_sync = not args.no_sync
