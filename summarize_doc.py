@@ -16,11 +16,13 @@ summarize_doc.py
      `C:\\Python314\\python.exe summarize_doc.py document_download\\MWAA1156005008`
 
 LLM backend (依序嘗試,任一可用即用):
+- gemini (走使用者既有 Google 訂閱 OAuth,模型用 CLI 預設 = 當期最新最佳)
 - claude -p (走使用者既有 claude.ai 訂閱 OAuth)
 - anthropic SDK + 環境變數 ANTHROPIC_API_KEY
-兩者皆不可用 → 報錯返回 None (無 fallback,因 fallback 邏輯也算規格,違反設計原則)。
+皆不可用 → 報錯返回 None (無 fallback,因 fallback 邏輯也算規格,違反設計原則)。
 """
 
+import json
 import os
 import re
 import shutil
@@ -35,8 +37,26 @@ _BASE_DIR = Path(__file__).parent.resolve()
 SPEC_MD = _BASE_DIR / "summarize_doc.md"
 DEFAULT_DOWNLOAD_DIR = _BASE_DIR / "document_download"
 
-# 模型字串會被 LLM 依規格寫入輸出檔名,也用於 anthropic SDK 呼叫。
-LLM_MODEL = "claude-opus-4-7"
+# prompt 階段「模型名」用 placeholder 餵給 LLM,backend 跑完後再用實際模型 ID
+# 替換。這樣不論用哪條 backend、哪個 model 變體(預覽/正式版/context 變體),
+# 輸出檔名都精確反映「當下實際用到的模型」,不會錯標。
+MODEL_PLACEHOLDER = "<<MODEL>>"
+
+# Gemini backend:不釘 model id,讓 gemini CLI 用預設 — Google 會把預設模型保持在
+# 當期最新最佳,寫死反而會卡在過期版本。CLI 在 --output-format json 下會回報
+# 實際被選的模型(可能是 pro / flash / preview),程式以該 ID 作檔名。
+# 若需強制指定,改成具體值如 "gemini-3-pro" 即可,程式會自動加上 -m 旗標。
+GEMINI_MODEL = None
+
+# Anthropic SDK fallback 才會用到此 model id;Claude Code CLI / Gemini CLI 走
+# 訂閱 OAuth 不需指定,以 CLI 預設模型為準。
+ANTHROPIC_SDK_MODEL = "claude-opus-4-7"
+
+# 主檔 PDF 檔名 pattern(來自 summarize_doc.md「公文主檔名:數字_數字[A~Z].pdf」,
+# 字母後綴可省略 → 1234_5678.pdf 與 1234_5678A.pdf 皆視為主檔)。
+# 程式只對符合此 pattern 的 PDF 抽文字 → 餵 LLM,其他 PDF(附件、會議資料等)略過,
+# 避免無關附件撐爆 LLM 輸入。此 pattern 在 spec/code 兩處有冗餘 — 改 spec 時記得同步。
+_MAIN_DOC_PATTERN = re.compile(r'^\d+_\d+[A-Z]?\.pdf$')
 
 
 def _strip_html_comments(text):
@@ -84,7 +104,7 @@ def _pdf_to_text(pdf_path):
     return "\n".join(pages)
 
 
-def _build_prompt(spec_md_text, llm_model, dir_inventory, pdf_texts):
+def _build_prompt(spec_md_text, dir_inventory, pdf_texts):
     """組 prompt:把規格 .md 全文 + 目錄檔案清單 + 各 PDF 全文一起餵 LLM,
     由 LLM 依規格決定:選哪個主檔、是否略過、輸出檔名、輸出內容。
 
@@ -101,7 +121,10 @@ def _build_prompt(spec_md_text, llm_model, dir_inventory, pdf_texts):
         "=== 規格 (summarize_doc.md 全文) ===\n\n"
         f"{spec_md_text}\n\n"
         "=== 環境參數 ===\n\n"
-        f"- 目前使用的 LLM 模型名(規格要求寫入輸出檔名):{llm_model}\n\n"
+        f"- 目前使用的 LLM 模型名(規格要求寫入輸出檔名):{MODEL_PLACEHOLDER}\n"
+        f"  ※ 此 placeholder「{MODEL_PLACEHOLDER}」會在 LLM 回應後由程式替換為實際模型 ID。\n"
+        f"    在輸出檔名與內容中需要使用模型名的位置,必須「一字不漏」貼上字串\n"
+        f"    「{MODEL_PLACEHOLDER}」(含尖括號),不要自行替換為任何 'claude-…' / 'gemini-…' 等實際模型名。\n\n"
         "=== 公文目錄現有檔案清單 ===\n\n"
         f"{inventory_lines}\n\n"
         "=== 目錄內所有 PDF 全文(已過濾頁眉/裝訂線雜訊) ===\n\n"
@@ -125,20 +148,85 @@ def _build_prompt(spec_md_text, llm_model, dir_inventory, pdf_texts):
     )
 
 
+def _llm_summarize_gemini_code(prompt_text):
+    """走 Gemini CLI — 用使用者既有的 Google 訂閱 OAuth 認證,不需 API key。
+
+    模型策略:不傳 -m,讓 gemini CLI 用預設模型(Google 會把預設保持在當期最新最佳)。
+    若 GEMINI_MODEL 常數有指定值,才加上 -m 旗標固定到該版本。
+
+    --output-format json 讓 CLI 回傳結構化 JSON,可從 stats.models 取得「實際被呼叫
+    的模型 ID」(可能是 gemini-3-pro / gemini-3-flash-preview 等,視 CLI 當下的預設
+    與配額路由而定),作為後續寫入檔名的依據。
+
+    cwd 用 tempdir,避免 gemini CLI 載到 project 的 GEMINI.md / CLAUDE.md 等
+    無關 instructions 干擾回應格式。
+
+    回 (response_text, model_id),失敗回 (None, None)。
+    """
+    gemini_exe = shutil.which("gemini")
+    if not gemini_exe:
+        return None, None
+    # 用 `-p ""` 強制進入非互動模式;真正的 prompt 從 stdin 餵入(避開 Windows
+    # CreateProcess 32K 命令列長度限制 — 含 PDF 全文的 prompt 很容易破表)。
+    # gemini CLI 行為:stdin 內容 + -p 值串接後送 LLM。
+    cmd = [gemini_exe, "-p", "", "--output-format", "json"]
+    if GEMINI_MODEL:
+        cmd.extend(["-m", GEMINI_MODEL])
+    with tempfile.TemporaryDirectory(prefix="gemini_summary_") as td:
+        try:
+            result = subprocess.run(
+                cmd,
+                input=prompt_text,
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                timeout=240,
+                cwd=td,
+            )
+        except subprocess.TimeoutExpired:
+            print("      [ERROR] gemini 超時(240s)")
+            return None, None
+        except Exception as e:
+            print(f"      [ERROR] subprocess gemini 例外:{type(e).__name__}: {e}")
+            return None, None
+    if result.returncode != 0:
+        snippet = (result.stderr or "").strip()[:300]
+        print(f"      [ERROR] gemini rc={result.returncode},stderr={snippet!r}")
+        return None, None
+    try:
+        data = json.loads(result.stdout or "")
+    except json.JSONDecodeError as e:
+        print(f"      [ERROR] gemini JSON 解析失敗:{e}")
+        return None, None
+    response_text = (data.get("response") or "").strip()
+    models = (data.get("stats") or {}).get("models") or {}
+    model_id = next(iter(models), None) if models else None
+    if not response_text or not model_id:
+        print(f"      [ERROR] gemini JSON 缺 response 或 stats.models;keys={list(data.keys())}")
+        return None, None
+    return response_text, model_id
+
+
 def _llm_summarize_claude_code(prompt_text):
     """走 Claude Code CLI (`claude -p`) — 用使用者既有的 claude.ai 訂閱 OAuth
     認證,不需 API key、不裝套件。
 
+    --output-format json 讓 CLI 回傳結構化 JSON,可從 modelUsage 取得「實際被呼叫
+    的模型 ID」(會反映目前訂閱對應的最新模型,如 claude-opus-4-7[1m] 等)。
+
     cwd 用 tempdir 避免 Claude Code 載到 project 的 CLAUDE.md(會把『對話末尾加引言
     區塊』之類規則套到回應上)。
+
+    回 (response_text, model_id),失敗回 (None, None)。
     """
     claude_exe = shutil.which("claude")
     if not claude_exe:
-        return None
+        return None, None
     with tempfile.TemporaryDirectory(prefix="claude_summary_") as td:
         try:
             result = subprocess.run(
-                [claude_exe, "-p"],
+                [claude_exe, "-p", "--output-format", "json"],
                 input=prompt_text,
                 capture_output=True,
                 text=True,
@@ -149,49 +237,69 @@ def _llm_summarize_claude_code(prompt_text):
             )
         except subprocess.TimeoutExpired:
             print("      [ERROR] claude -p 超時(240s)")
-            return None
+            return None, None
         except Exception as e:
             print(f"      [ERROR] subprocess claude -p 例外:{type(e).__name__}: {e}")
-            return None
+            return None, None
     if result.returncode != 0:
         snippet = (result.stderr or "").strip()[:300]
         print(f"      [ERROR] claude -p rc={result.returncode},stderr={snippet!r}")
-        return None
-    return (result.stdout or "").strip()
+        return None, None
+    try:
+        data = json.loads(result.stdout or "")
+    except json.JSONDecodeError as e:
+        print(f"      [ERROR] claude -p JSON 解析失敗:{e}")
+        return None, None
+    response_text = (data.get("result") or "").strip()
+    model_usage = data.get("modelUsage") or {}
+    model_id = next(iter(model_usage), None) if model_usage else None
+    if not response_text or not model_id:
+        print(f"      [ERROR] claude -p JSON 缺 result 或 modelUsage;keys={list(data.keys())}")
+        return None, None
+    return response_text, model_id
 
 
 def _llm_summarize_anthropic(prompt_text):
-    """fallback backend:anthropic SDK + API key。沒 key 或 SDK 沒裝 → 回 None。"""
+    """fallback backend:anthropic SDK + API key。沒 key 或 SDK 沒裝 → 回 (None, None)。
+
+    回 (response_text, model_id);model_id 取自 API response 的 model 欄位
+    (反映 API 端實際路由的版本,通常等於請求的 ANTHROPIC_SDK_MODEL)。
+    """
     if not os.environ.get("ANTHROPIC_API_KEY"):
-        return None
+        return None, None
     try:
         import anthropic
     except ImportError:
-        return None
+        return None, None
     try:
         client = anthropic.Anthropic()
         resp = client.messages.create(
-            model=LLM_MODEL,
+            model=ANTHROPIC_SDK_MODEL,
             max_tokens=2048,
             messages=[{"role": "user", "content": prompt_text}],
         )
-        return resp.content[0].text.strip()
+        return resp.content[0].text.strip(), (resp.model or ANTHROPIC_SDK_MODEL)
     except Exception as e:
         print(f"      [ERROR] Anthropic SDK 呼叫失敗:{type(e).__name__}: {e}")
-        return None
+        return None, None
 
 
 def _call_backends(prompt):
-    """依序試各 backend,第一個成功的勝出。回 (response, backend_name) 或 (None, None)。"""
-    print("      嘗試 backend: claude_code (subprocess claude -p)...")
-    s = _llm_summarize_claude_code(prompt)
+    """依序試各 backend,第一個成功的勝出。
+    回 (response_text, backend_name, model_id) 或 (None, None, None)。"""
+    print("      嘗試 backend: gemini_code (subprocess gemini, OAuth)...")
+    s, m = _llm_summarize_gemini_code(prompt)
     if s:
-        return s, "claude_code"
+        return s, "gemini_code", m
+    print("      gemini_code 不可用,嘗試 backend: claude_code (subprocess claude -p)...")
+    s, m = _llm_summarize_claude_code(prompt)
+    if s:
+        return s, "claude_code", m
     print("      claude_code 不可用,嘗試 backend: anthropic SDK...")
-    s = _llm_summarize_anthropic(prompt)
+    s, m = _llm_summarize_anthropic(prompt)
     if s:
-        return s, "anthropic"
-    return None, None
+        return s, "anthropic", m
+    return None, None, None
 
 
 def _parse_response(response):
@@ -219,6 +327,14 @@ def summarize_doc(doc_dir):
         return None
     print(f"[summarize_doc] 處理 {doc_dir.name}")
 
+    # 預檢:目錄內已有總結檔(*總結.*.md,例 1234_5678A總結.gemini-3-flash-preview.md)
+    # 就直接跳過,連 PDF 抽文字 / LLM round-trip 都省。spec 端 SKIP 規則仍是 source of
+    # truth,此處只是早一步攔下來的捷徑。
+    existing = sorted(doc_dir.glob('*總結.*.md'))
+    if existing:
+        print(f"      已存在總結檔 {existing[0].name},略過(省 LLM)")
+        return None
+
     try:
         spec_md_text = SPEC_MD.read_text(encoding='utf-8')
     except FileNotFoundError:
@@ -233,22 +349,25 @@ def summarize_doc(doc_dir):
 
     pdf_texts = {}
     for name in inventory:
-        if not name.lower().endswith('.pdf'):
+        if not _MAIN_DOC_PATTERN.match(name):
             continue
         raw = _pdf_to_text(doc_dir / name)
         if raw.strip():
             pdf_texts[name] = _clean_pdf_text(raw)
     if not pdf_texts:
-        print(f"[ERROR] {doc_dir.name}:目錄內無可抽文字的 PDF")
+        print(f"[ERROR] {doc_dir.name}:找不到主檔 PDF(數字_數字[A-Z]?.pdf)")
         return None
     print(f"      抽到 {len(pdf_texts)} 份 PDF 文字:{list(pdf_texts.keys())}")
 
-    prompt = _build_prompt(spec_md_text, LLM_MODEL, inventory, pdf_texts)
-    response, backend = _call_backends(prompt)
+    prompt = _build_prompt(spec_md_text, inventory, pdf_texts)
+    response, backend, model_id = _call_backends(prompt)
     if not response:
         print("[ERROR] 所有 LLM backend 都不可用,無法依規格做總結")
         return None
-    print(f"      LLM 回應 {len(response)} 字 (backend={backend})")
+    print(f"      LLM 回應 {len(response)} 字 (backend={backend}, model={model_id})")
+    # 把 prompt 階段塞給 LLM 的 model placeholder 替換成 backend 報告的真實
+    # model id — 確保檔名與內文中的模型名與當下實際使用一致(不論走哪條 backend)。
+    response = response.replace(MODEL_PLACEHOLDER, model_id)
 
     parsed = _parse_response(response)
     if parsed is None:
