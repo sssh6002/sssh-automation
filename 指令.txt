@@ -1,0 +1,6 @@
+C:\Python314\python.exe  C:\Users\ldc\Documents\GitHub\sssh-automation\main.py  主程式
+
+C:\Python314\python.exe  C:\Users\ldc\Documents\GitHub\sssh-automation\summarize_doc.py 總結\document_download內所有目錄的公文檔 
+C:\Python314\python.exe  C:\Users\ldc\Documents\GitHub\sssh-automation\summarize_doc.py C:\Users\ldc\Documents\GitHub\sssh-automation\document_download\MWxxx 同上，但為單一目錄
+
+rm C:\Users\ldc\Documents\GitHub\sssh-automation\document_download\**\*.md
