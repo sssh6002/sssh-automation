@@ -10,10 +10,19 @@ document_closure.py
    session 過期時會提示跑 main.py 重新登入。
 """
 
+import os
 import sys
 import time
 
 sys.stdout.reconfigure(encoding='utf-8')
+
+# 單獨執行（python document_closure/document_closure.py）時，Python 只把腳本所在的
+# document_closure/ 加進 sys.path，找不到專案根目錄的 taipeion_login_selenium /
+# document_system 等模組。把專案根目錄（本檔的上層目錄）插進 sys.path 才能 import。
+# 從 main.py 以 package 形式 import 時根目錄已在 path，重複插入無害。
+_PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+if _PROJECT_ROOT not in sys.path:
+    sys.path.insert(0, _PROJECT_ROOT)
 
 # edoc 公文首頁 URL（與 document_system.py 保持一致）
 EDOC_HOME_URL = "https://edoc.gov.taipei/tcqb/home/default.jsp?inLine=Y"
