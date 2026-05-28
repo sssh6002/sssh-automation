@@ -82,6 +82,42 @@ def _copy_summary_from_pending(closure_dir):
     return count
 
 
+def _close_doc_viewer_window(driver):
+    """關閉當前 focus 的公文閱覽器分頁,切回主(待結案清單)分頁。
+
+    流程:
+    1. 讀 window_handles;只剩 1 個就跳過(避免關掉唯一 window 把 driver 弄掛)
+    2. 記下 current handle、切回去用的 other handle
+    3. driver.close() 關當前 window
+    4. switch_to.window(other) 切回主分頁
+
+    成功 → True;失敗(讀 handles 例外 / 找不到其他 window / close 例外)→ False。
+    """
+    try:
+        handles = driver.window_handles
+    except Exception as e:
+        print(f"      x  讀 window_handles 失敗:{type(e).__name__}: {e}")
+        return False
+
+    if len(handles) <= 1:
+        print("      [INFO] 只剩 1 個 window,不關閉(避免 driver session 失效)")
+        return True
+
+    try:
+        current = driver.current_window_handle
+        other = next((h for h in handles if h != current), None)
+        if other is None:
+            print("      [WARN] 找不到其他 window,不關閉")
+            return False
+        driver.close()
+        driver.switch_to.window(other)
+        print("      OK:已關閉公文閱覽器分頁,切回主分頁")
+        return True
+    except Exception as e:
+        print(f"      x  關閉分頁失敗:{type(e).__name__}: {e}")
+        return False
+
+
 def _delete_pending_archive(closure_dir):
     """刪除 document_download/<同公文文號>/ 目錄。
 
@@ -382,6 +418,8 @@ def process_document_closure(driver):
         print(f"[document_closure] 核決區未見「{_APPROVAL_KEYWORD}」，"
               "保守不下載(可能還在簽核或意見有異)。dump frame 內容供除錯:")
         _dump_frames_diagnostic(driver)
+        print("[document_closure] 關閉公文閱覽器分頁...")
+        _close_doc_viewer_window(driver)
         return True
 
     print(f"[document_closure] ✓ 核決區有「{_APPROVAL_KEYWORD}」，"
@@ -411,6 +449,10 @@ def process_document_closure(driver):
             print("[document_closure] 未複製到總結,保留承辦中目錄供檢查(不刪除)。")
     else:
         print("[document_closure] ✓ 結案存查下載完成 (非 zip，原檔保留)")
+
+    # 歸檔完成,關閉公文閱覽器分頁讓畫面回到待結案清單
+    print("[document_closure] 關閉公文閱覽器分頁...")
+    _close_doc_viewer_window(driver)
 
     # TODO: 依 doc_no 選擇存查檔號、送出結案存查表單
     print("[document_closure] TODO: 依文號選擇存查檔號、送出結案存查表單（尚未實作）")
