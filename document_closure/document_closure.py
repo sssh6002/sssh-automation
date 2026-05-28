@@ -82,6 +82,93 @@ def _copy_summary_from_pending(closure_dir):
     return count
 
 
+def _check_pending_closeout_row(driver, doc_no, timeout=10):
+    """在待結案清單找含 doc_no 的列、勾選該列的 checkbox。
+
+    流程:
+    1. _switch_to_frame_with_xpath(reuse from document_system):切到含目標 row 的
+       frame(通常是 dTreeContent),確認該列存在
+    2. 在該 frame 內 XPath 抓該列的 checkbox
+    3. _try_check_checkbox(reuse):iCheck plugin 兼容的勾選策略
+
+    回 True = 已勾選;False = 找不到列 / 找不到 checkbox / 勾選失敗。
+    """
+    from document_system import _switch_to_frame_with_xpath, _try_check_checkbox
+
+    # 含 doc_no 文字的列(放寬到 td 內任一元素含此文字)
+    row_xpath = (
+        f"//tr[.//td[contains(normalize-space(), '{doc_no}')] "
+        f"or .//*[contains(normalize-space(), '{doc_no}')]]"
+    )
+    if not _switch_to_frame_with_xpath(driver, row_xpath, f"含「{doc_no}」的列",
+                                        timeout=timeout):
+        print(f"[ERROR] 找不到含「{doc_no}」的列,無法勾選")
+        return False
+
+    cb_xpath = row_xpath + "//input[@type='checkbox']"
+    try:
+        cbs = driver.find_elements(By.XPATH, cb_xpath)
+    except Exception as e:
+        print(f"[ERROR] 找列 checkbox 例外:{type(e).__name__}: {e}")
+        return False
+
+    if not cbs:
+        print(f"[ERROR] 含「{doc_no}」的列內找不到 checkbox")
+        return False
+
+    if _try_check_checkbox(driver, cbs[0]):
+        print(f"      OK:已勾選含「{doc_no}」的列 checkbox")
+        return True
+    print(f"[ERROR] 勾選「{doc_no}」列的 checkbox 失敗")
+    return False
+
+
+# 「存查」按鈕 XPath 候選 — 與 document_system.SIGNOFF_BUTTON_XPATHS 同套路:
+# edoc 清單上方按鈕多半是 <input value="存查">,純文字搜尋抓不到,要 @value。
+_ARCHIVE_BUTTON_XPATHS = [
+    "//input[@value='存查']",
+    "//*[@value='存查']",
+    "//button[normalize-space()='存查']",
+    "//a[normalize-space()='存查']",
+    "//input[@type='button' and @value='存查']",
+    "//input[@type='submit' and @value='存查']",
+    "//*[normalize-space()='存查' and (self::button or @role='button')]",
+    "//*[normalize-space()='存查']/ancestor::button[1]",
+    "//*[normalize-space()='存查']/ancestor::a[1]",
+]
+
+
+def _click_archive_button(driver, timeout=15):
+    """點清單上方的「存查」按鈕(_ARCHIVE_BUTTON_XPATHS 由窄到寬)。
+
+    使用 JS click 繞遮罩,呼叫前 driver focus 應已在含按鈕的 frame
+    (_check_pending_closeout_row 已切好)。
+
+    成功 → True;timeout 內所有 XPath 都失敗 → False。
+    """
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        for xp in _ARCHIVE_BUTTON_XPATHS:
+            try:
+                els = driver.find_elements(By.XPATH, xp)
+            except Exception:
+                continue
+            for el in els:
+                try:
+                    if not el.is_displayed():
+                        continue
+                    driver.execute_script(
+                        "arguments[0].scrollIntoView({block:'center'}); "
+                        "arguments[0].click();", el)
+                    print(f"      OK:點到「存查」按鈕(XPath: {xp})")
+                    return True
+                except Exception:
+                    continue
+        time.sleep(0.5)
+    print("[ERROR] 找不到「存查」按鈕(全部 XPath 都失敗)")
+    return False
+
+
 def _close_doc_viewer_window(driver):
     """關閉當前 focus 的公文閱覽器分頁,切回主(待結案清單)分頁。
 
@@ -227,16 +314,13 @@ def _find_keyword_in_current_frame(driver, keyword):
         return None
 
 
-def _has_approval_text(driver, keyword=_APPROVAL_KEYWORD, timeout=10):
-    """檢查公文閱覽器頁面是否含結案存查判定關鍵字（預設「如擬」）。
+def _search_keyword_in_all_frames(driver, keyword, timeout=10):
+    """在 top-level + 所有 iframe 內搜尋 keyword(reuse _FIND_KEYWORD_JS,
+    會檢 innerText、input/textarea/select.value、title/placeholder/aria-label
+    等屬性)。
 
-    公文閱覽器是 iframe-based 排版，右側「承辦/會辦/核決」意見區的「如擬」實測
-    是 <input> 的 value(不是純文字節點),innerText 抓不到。本函式用 _FIND_KEYWORD_JS
-    同時檢查 innerText / form field value / 常見屬性。
-
-    策略：每輪先檢查 top-level，再遍歷所有 iframe；每輪 0.5s 直到 timeout。
-    命中時印命中來源(innerText / input.value / attr:xxx) + 哪個 frame，方便將來
-    判斷失敗時除錯。
+    每輪 0.5s 一次直到 timeout，讓非同步載入的內容也能命中。命中時印命中來源
+    與 frame name,方便將來除錯。
 
     回 True 表示頁面任一處有 keyword、False 表示 timeout 內都找不到。
     """
@@ -272,6 +356,15 @@ def _has_approval_text(driver, keyword=_APPROVAL_KEYWORD, timeout=10):
             pass
         time.sleep(0.5)
     return False
+
+
+def _has_approval_text(driver, keyword=_APPROVAL_KEYWORD, timeout=10):
+    """檢查公文閱覽器頁面是否含結案存查判定關鍵字（預設「如擬」）。
+
+    Delegate 到 _search_keyword_in_all_frames(通用搜尋)。本函式只是給「如擬」
+    判定一個語義明確的入口。
+    """
+    return _search_keyword_in_all_frames(driver, keyword, timeout)
 
 
 def _dump_frames_diagnostic(driver, keyword=_APPROVAL_KEYWORD):
@@ -454,8 +547,28 @@ def process_document_closure(driver):
     print("[document_closure] 關閉公文閱覽器分頁...")
     _close_doc_viewer_window(driver)
 
-    # TODO: 依 doc_no 選擇存查檔號、送出結案存查表單
-    print("[document_closure] TODO: 依文號選擇存查檔號、送出結案存查表單（尚未實作）")
+    # ── 待結案清單:勾選同公文號的列、點「存查」、驗證存查表單公文號 ─────
+    print(f"[document_closure] 在待結案清單找「{doc_no}」的列、勾選...")
+    if not _check_pending_closeout_row(driver, doc_no):
+        print("[document_closure] 勾選失敗,跳過存查表單流程(歸檔已成功)。")
+        return True
+
+    print("[document_closure] 點「存查」按鈕...")
+    if not _click_archive_button(driver):
+        print("[document_closure] 點「存查」失敗,跳過存查表單流程(歸檔已成功)。")
+        return True
+
+    # 驗證存查表單上的公文文號 = 剛剛勾選的 doc_no(防呆:避免系統打開錯的表單)
+    print(f"[document_closure] 等存查表單載入、驗證公文文號 = 「{doc_no}」...")
+    if not _search_keyword_in_all_frames(driver, doc_no, timeout=15):
+        print(f"[ERROR] 存查表單上看不到公文文號「{doc_no}」 — "
+              "可能系統開錯表單。保持視窗不關閉,請手動檢查。")
+        return False
+
+    print(f"[document_closure] ✓ 存查表單公文文號確認 = 「{doc_no}」")
+
+    # TODO: 依存檔層級/案次號/檔號 等欄位填表 + 點「確定存檔」
+    print("[document_closure] TODO: 填存查表單欄位、點「確定存檔」（尚未實作）")
     print("[document_closure] 結案存查流程結束。")
     return True
 
