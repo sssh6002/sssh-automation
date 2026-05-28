@@ -26,6 +26,7 @@ id.txt
 #目錄
 document_download/*
 document_download_labeled/*
+document_download_closure/*
 
 # doc_classifier
 doc_classifier/training_data/*

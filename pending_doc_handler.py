@@ -816,24 +816,34 @@ def _delete_zip_with_retry(zip_path, attempts=10, interval=0.5):
     return False
 
 
-def _download_and_extract(driver):
-    """公文閱覽器:點「下載」按鈕、下載到 DOWNLOAD_DIR、若為 zip 解到子目錄。
+def _download_and_extract(driver, download_dir=None, summarize=True):
+    """公文閱覽器:點「下載」按鈕、下載到 download_dir、若為 zip 解到子目錄。
+
+    參數:
+    - download_dir:下載目標資料夾(絕對路徑);None 用模組預設 DOWNLOAD_DIR
+      (= document_download/)。結案存查流程會傳 document_download_closure/。
+    - summarize:解壓後是否鏈式呼叫 summarize_doc 對公文主檔產 LLM 總結。
+      預設 True(承辦中流程);結案存查流程傳 False(已核可的公文不需摘要)。
 
     流程:
-    1. CDP 設下載目錄 = DOWNLOAD_DIR
+    1. CDP 設下載目錄 = download_dir
     2. snapshot 既有檔案
     3. 點「下載」按鈕
     4. 等新檔(非 .crdownload / .tmp / 無副檔名)出現且 size 穩定
-    5. 是 zip → 解壓縮到 DOWNLOAD_DIR/<檔名去副檔名>/,解壓成功則刪原 zip
+    5. 是 zip → 解壓縮到 download_dir/<檔名去副檔名>/,解壓成功則刪原 zip
+    6. 若 summarize=True 則呼叫 summarize_doc.summarize_extracted
 
     回 (True, extract_dir 或 None) 表示流程順利;extract_dir=None 代表下載成功
     但非 zip(原檔保留)。回 (False, None) 表示中途失敗。
     """
-    print("[pending_doc_handler] 設定下載目錄...")
-    if not _set_chrome_download_dir(driver, DOWNLOAD_DIR):
+    if download_dir is None:
+        download_dir = DOWNLOAD_DIR
+
+    print(f"[pending_doc_handler] 設定下載目錄 → {download_dir}")
+    if not _set_chrome_download_dir(driver, download_dir):
         return False, None
 
-    snapshot = _snapshot_dir(DOWNLOAD_DIR)
+    snapshot = _snapshot_dir(download_dir)
     print(f"      snapshot 既有 {len(snapshot)} 個檔案/目錄")
 
     print("[pending_doc_handler] 點「下載」按鈕...")
@@ -843,11 +853,11 @@ def _download_and_extract(driver):
     # 點完 packageBtn 觸發的不是 Chrome 下載 — 是 KdApp (javaw) 開的 JFileChooser
     # 「匯出公文資料」對話框,讓使用者選資料夾。Chrome CDP setDownloadBehavior 對
     # 它無效。用 Win32 鍵盤模擬填路徑 + 按 Enter。
-    if not _handle_export_dialog(DOWNLOAD_DIR, timeout=30):
+    if not _handle_export_dialog(download_dir, timeout=30):
         return False, None
 
-    print(f"[pending_doc_handler] 等 zip 出現在 {DOWNLOAD_DIR} (timeout 120s)...")
-    new_path = _wait_for_new_file(DOWNLOAD_DIR, snapshot, timeout=120)
+    print(f"[pending_doc_handler] 等 zip 出現在 {download_dir} (timeout 120s)...")
+    new_path = _wait_for_new_file(download_dir, snapshot, timeout=120)
     if new_path is None:
         print("[ERROR] 等了 120s 沒看到新檔。可能下載被瀏覽器擋、或按鈕點到了但沒觸發下載。")
         return False, None
@@ -855,7 +865,7 @@ def _download_and_extract(driver):
     print(f"      OK:下載完成 — {new_path}")
 
     print("[pending_doc_handler] 解壓縮...")
-    extract_dir = _extract_zip(new_path, DOWNLOAD_DIR)
+    extract_dir = _extract_zip(new_path, download_dir)
 
     if extract_dir is not None:
         # 解壓後若 zip 內頂層只是個外殼資料夾 (例如「公文」/「來文」,隨公文類型異),
@@ -867,16 +877,17 @@ def _download_and_extract(driver):
         # 握著 zip handle,Windows 下會擋刪除,需等它放手(詳見 _delete_zip_with_retry)。
         _delete_zip_with_retry(new_path)
 
-        # 鏈式呼叫 summarize_doc:對解壓出來的公文主檔產出 markdown 總結。
-        # summarize_doc 規格寫在 summarize_doc.md (LLM 用、人類維護),程式 runtime
-        # 讀該檔當 LLM instruction。沒 ANTHROPIC_API_KEY 會跳過 LLM 步驟、只寫保留
-        # 欄位 (發文日期/字號/主旨),整體流程不會因此 fail。
-        try:
-            from summarize_doc import summarize_extracted
-            summarize_extracted(extract_dir)
-        except Exception as e:
-            print(f"      [WARN] summarize_doc 呼叫失敗 (不影響下載流程):"
-                  f"{type(e).__name__}: {e}")
+        if summarize:
+            # 鏈式呼叫 summarize_doc:對解壓出來的公文主檔產出 markdown 總結。
+            # summarize_doc 規格寫在 summarize_doc.md (LLM 用、人類維護),程式 runtime
+            # 讀該檔當 LLM instruction。沒 ANTHROPIC_API_KEY 會跳過 LLM 步驟、只寫保留
+            # 欄位 (發文日期/字號/主旨),整體流程不會因此 fail。
+            try:
+                from summarize_doc import summarize_extracted
+                summarize_extracted(extract_dir)
+            except Exception as e:
+                print(f"      [WARN] summarize_doc 呼叫失敗 (不影響下載流程):"
+                      f"{type(e).__name__}: {e}")
 
     return True, extract_dir
 
