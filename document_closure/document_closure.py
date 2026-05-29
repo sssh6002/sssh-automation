@@ -43,35 +43,43 @@ CLOSURE_DOWNLOAD_DIR = os.path.normpath(os.path.join(_PROJECT_ROOT, "document_do
 _APPROVAL_KEYWORD = "如擬"
 
 
-def _copy_summary_from_pending(closure_dir):
-    """從 document_download/<同公文文號>/ 找 *總結*.md 複製到 closure_dir。
+def _copy_meta_files_from_pending(closure_dir):
+    """從 document_download/<同公文文號>/ 找 *總結*.md + *內容.txt 複製到 closure_dir。
 
-    結案存查時通常公文在承辦中流程已下載並摘要過(summarize_doc 產出
-    「公文主檔名總結.<LLM 模型名>.md」)。把該摘要也歸檔到結案存查目錄,
-    讓最終歸檔目錄一目了然(原始檔 + LLM 摘要),不必兩個資料夾翻來翻去。
+    結案存查時公文在承辦中流程通常已產生兩種 meta 檔(由 summarize_doc 產出):
+    - *內容.txt:純文字版完整內容(發文日期/字號/主旨/說明/附件)
+    - *總結.<LLM 模型名>.md:含分類標記 + LLM 摘要
+    把兩類 meta 檔都歸檔到結案存查目錄,讓最終歸檔目錄包含完整脈絡(原始檔 +
+    純文字內容 + LLM 摘要),不必兩個資料夾翻來翻去。
 
     流程:
-    1. closure_dir 的 basename = 公文文號(例 MWAA1156005236)
-    2. pending_doc_handler.DOWNLOAD_DIR/<公文文號>/ 找 *總結*.md
-    3. shutil.copy2 到 closure_dir(保留 mtime)
+    1. closure_dir basename = 公文文號(例 MWAA1156005236)
+    2. pending_doc_handler.DOWNLOAD_DIR/<公文文號>/ glob *總結*.md + *內容.txt
+    3. shutil.copy2 各檔到 closure_dir(保留 mtime)
 
-    回成功複製的檔數(>=0)。源目錄不存在或無命中檔案都回 0(印警告)。
+    回成功複製的檔數(>=0)。源目錄不存在或無命中檔都印 WARN 回 0。
     """
     from pending_doc_handler import DOWNLOAD_DIR as _PENDING_DIR
 
     doc_no = os.path.basename(os.path.normpath(closure_dir))
     src_dir = os.path.join(_PENDING_DIR, doc_no)
     if not os.path.isdir(src_dir):
-        print(f"      [WARN] 找不到承辦中目錄 {src_dir},無 *總結*.md 可複製")
+        print(f"      [WARN] 找不到承辦中目錄 {src_dir},無 meta 檔可複製")
         return 0
 
-    summary_files = glob.glob(os.path.join(src_dir, "*總結*.md"))
-    if not summary_files:
-        print(f"      [WARN] {src_dir} 內無 *總結*.md")
+    # 收集 *總結*.md + *內容.txt;sorted 讓 log 順序可預測
+    patterns = ["*總結*.md", "*內容.txt"]
+    target_files = []
+    for pat in patterns:
+        target_files.extend(glob.glob(os.path.join(src_dir, pat)))
+    target_files = sorted(target_files)
+
+    if not target_files:
+        print(f"      [WARN] {src_dir} 內無 *總結*.md 或 *內容.txt")
         return 0
 
     count = 0
-    for src_path in summary_files:
+    for src_path in target_files:
         dst_path = os.path.join(closure_dir, os.path.basename(src_path))
         try:
             shutil.copy2(src_path, dst_path)
@@ -604,17 +612,17 @@ def process_document_closure(driver):
         return False
     if extract_dir:
         print(f"[document_closure] ✓ 結案存查下載完成，解壓到 {extract_dir}")
-        # 把承辦中流程已產生的 *總結*.md 一起歸檔到結案目錄
-        print("[document_closure] 從承辦中目錄複製 *總結*.md 到結案目錄...")
-        copied = _copy_summary_from_pending(extract_dir)
-        # 已歸檔完成(總結也已複製)→ 刪除承辦中重複目錄。
-        # 條件:copied > 0 才刪 — 沒總結可複製代表承辦中流程沒走完(或無 API key
-        # 沒產 LLM 摘要),保留承辦中目錄供事後檢查比較安全。
+        # 把承辦中流程已產生的 meta 檔(*總結*.md + *內容.txt)一起歸檔到結案目錄
+        print("[document_closure] 從承辦中目錄複製 *總結*.md + *內容.txt 到結案目錄...")
+        copied = _copy_meta_files_from_pending(extract_dir)
+        # 已歸檔完成 → 刪除承辦中重複目錄。
+        # 條件:copied > 0 才刪 — 沒任何 meta 檔可複製代表承辦中流程沒走完
+        # (或 LLM 不可用未產 meta 檔),保留承辦中目錄供事後檢查比較安全。
         if copied > 0:
-            print("[document_closure] 總結已歸檔,刪除承辦中重複目錄...")
+            print(f"[document_closure] 已歸檔 {copied} 個 meta 檔,刪除承辦中重複目錄...")
             _delete_pending_archive(extract_dir)
         else:
-            print("[document_closure] 未複製到總結,保留承辦中目錄供檢查(不刪除)。")
+            print("[document_closure] 未複製到任何 meta 檔,保留承辦中目錄供檢查(不刪除)。")
     else:
         print("[document_closure] ✓ 結案存查下載完成 (非 zip，原檔保留)")
 
