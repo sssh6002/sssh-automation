@@ -748,23 +748,19 @@ def _fill_pincode_robust(driver, pincode_input, pin):
     return False
 
 
-def _handle_pincode_popup(driver, popup_timeout=15, close_timeout=20,
-                          manual_timeout=60):
+def _handle_pincode_popup(driver, popup_timeout=15, close_timeout=20):
     """處理「確定存檔」後跳出的 pinCode 視窗(URL: localhost:16888/doPostMsg)。
 
-    流程:
+    流程(全自動,任一步失敗就停):
     1. 等新 window 出現(popup_timeout 秒),switch 過去
-    2. 讀 PIN from id.txt
-    3. 找 pinCode input → _fill_pincode_robust 多策略填入
-    4. 自動填 + 點「確定」成功 → 等 popup 關閉(close_timeout)
-    5. 自動填失敗 → 提示使用者手動完成、等 popup 關閉(manual_timeout)
+    2. 讀 PIN from id.txt(失敗 → 停)
+    3. 找 pinCode input(失敗 → 停)
+    4. _fill_pincode_robust 多策略填入 PIN(全部失敗 → 停)
+    5. 點「確定」(失敗 → 停)
+    6. 等 popup 關閉(close_timeout)
 
-    回 True 表示 popup 已關閉(成功歸檔,不論自動或手動);False 表示 timeout 內
-    popup 仍未關閉(可能使用者放棄)或前置步驟失敗。
-
-    為何 popup 關閉就算成功:存查流程的「事實判定」在外層的
-    _verify_archive_success_by_listing(看 doc_no 是否從清單消失);本函式只負責
-    把 pinCode 視窗推進到關閉狀態,不論 PIN 是程式自動填、還是使用者手動填。
+    回 True 表示 popup 已關閉(系統完成簽章);任一步失敗 → False,
+    popup 保留供使用者手動完成,但主流程結束、不會走後續寫存查標記。
     """
     from taipeion_login_selenium import _read_pin
 
@@ -807,9 +803,12 @@ def _handle_pincode_popup(driver, popup_timeout=15, close_timeout=20,
 
     pin = _read_pin()
     if not pin:
-        print("[WARN] 讀不到 PIN(id.txt 不存在/空),等待使用者手動填...")
-        return _wait_pincode_popup_close(driver, new_handle, original_handle,
-                                          manual_timeout)
+        print("[ERROR] 讀不到 PIN(id.txt 不存在/空),popup 保留供手動處理。")
+        try:
+            driver.switch_to.window(original_handle)
+        except Exception:
+            pass
+        return False
 
     # 找 pinCode input
     pincode_input = None
@@ -834,15 +833,20 @@ def _handle_pincode_popup(driver, popup_timeout=15, close_timeout=20,
             time.sleep(0.3)
 
     if not pincode_input:
-        print(f"[WARN] 找不到 pinCode input,等待使用者手動完成({manual_timeout}s)...")
-        return _wait_pincode_popup_close(driver, new_handle, original_handle,
-                                          manual_timeout)
+        print("[ERROR] 找不到 pinCode input,popup 保留供手動處理。")
+        try:
+            driver.switch_to.window(original_handle)
+        except Exception:
+            pass
+        return False
 
     if not _fill_pincode_robust(driver, pincode_input, pin):
-        print(f"[WARN] 所有自動填 PIN 策略都失敗,等待使用者手動填 PIN + 按確定"
-              f"({manual_timeout}s)...")
-        return _wait_pincode_popup_close(driver, new_handle, original_handle,
-                                          manual_timeout)
+        print("[ERROR] 所有自動填 PIN 策略都失敗,停止流程。popup 保留,請手動完成。")
+        try:
+            driver.switch_to.window(original_handle)
+        except Exception:
+            pass
+        return False
 
     # 點「確定」
     clicked = False
@@ -866,42 +870,37 @@ def _handle_pincode_popup(driver, popup_timeout=15, close_timeout=20,
         if clicked:
             break
     if not clicked:
-        print(f"[WARN] 找不到 pinCode 視窗「確定」按鈕,等使用者手動按"
-              f"({manual_timeout}s)...")
-        return _wait_pincode_popup_close(driver, new_handle, original_handle,
-                                          manual_timeout)
-
-    return _wait_pincode_popup_close(driver, new_handle, original_handle,
-                                      close_timeout)
-
-
-def _wait_pincode_popup_close(driver, popup_handle, original_handle, timeout):
-    """等 pinCode popup 關閉,然後切回主 window。回 True=已關;False=timeout 未關。"""
-    print(f"      等 pinCode 視窗關閉(最多 {timeout}s)...")
-    deadline = time.time() + timeout
-    while time.time() < deadline:
+        print("[ERROR] 找不到 pinCode 視窗「確定」按鈕,popup 保留供手動處理。")
         try:
-            current = driver.window_handles
+            driver.switch_to.window(original_handle)
         except Exception:
-            current = []
-        if popup_handle not in current:
+            pass
+        return False
+
+    # 等 popup 關閉
+    close_deadline = time.time() + close_timeout
+    popup_closed = False
+    while time.time() < close_deadline:
+        try:
+            current_handles = driver.window_handles
+        except Exception:
+            current_handles = []
+        if new_handle not in current_handles:
+            popup_closed = True
             print("      OK:pinCode 視窗已關閉(系統完成簽章)")
-            try:
-                if original_handle in driver.window_handles:
-                    driver.switch_to.window(original_handle)
-                    print("      OK:切回主 window")
-            except Exception as e:
-                print(f"      [WARN] 切回主 window 失敗:{type(e).__name__}: {e}")
-            return True
-        time.sleep(0.5)
-    print(f"      [ERROR] {timeout}s 內 popup 未關閉")
-    # 仍嘗試切回主 window
+            break
+        time.sleep(0.3)
+    if not popup_closed:
+        print(f"      [WARN] pinCode 視窗 {close_timeout}s 內沒關閉,可能仍處理中")
+
+    # 切回主 window
     try:
         if original_handle in driver.window_handles:
             driver.switch_to.window(original_handle)
-    except Exception:
-        pass
-    return False
+            print("      OK:切回主 window")
+    except Exception as e:
+        print(f"      [WARN] 切回主 window 失敗:{type(e).__name__}: {e}")
+    return True
 
 
 # 找 doc_no 在可見 <tr>(待結案清單的列)的 JS — 比通用 _FIND_KEYWORD_JS 更精確:
