@@ -22,49 +22,53 @@ _VIEWER_URL_PREFIX = "https://edoc.gov.taipei/tcqb/oa/index.html?app=editor"
 _DOSNO_RE = re.compile(r"[?&]doSno=(\d+)")
 
 
-def _read_marks(extract_dir):
-    """從 extract_dir 找 *總結*.md,解析 `## 標記1 標記2` 行,回標記 list。
+_DEFAULT_TEMPLATE = "擬:\n<承辦文字>陳閱後文存查。"
 
-    找不到總結檔、或沒有以 `##` 開頭的標記行 → 回 []。
-    (存查分類行開頭是單一 `#`,不會被誤判為標記行。)
+
+def _read_action(extract_dir):
+    """從 *總結*.md 讀「承辦文字」+「動作」。回 (fragment_or_None, action_or_None)。
+
+    依 summarize_doc.md spec,總結檔頂端格式:
+      第 1 行 `#存查分類:<類別> <檔號>`  (單 `#`)
+      第 2 行 `## <承辦文字>`              (雙 `#`)
+      第 3 行 `### <動作/承辦方式>`        (三 `#`)
+
+    本函式逐行掃描,找以 `##` 開頭的行(`##` / `###` 都算),由上而下取前兩個:
+      第 1 個命中 → 「承辦文字」(strip 開頭所有 # 與空白)
+      第 2 個命中 → 「動作」
+    任一欄不存在或空字串 → 該欄回 None,由 caller 套 default。
+
+    找不到總結檔 → 回 (None, None)。
     """
     extract_dir = pathlib.Path(extract_dir)
     summaries = sorted(extract_dir.glob("*總結*.md"))
     if not summaries:
-        return []
+        return None, None
+    hash_lines = []
     for raw in summaries[0].read_text(encoding="utf-8").splitlines():
         line = raw.strip()
         if line.startswith("##"):
-            return line.lstrip("#").split()
-    return []
+            content = line.lstrip("#").strip()
+            hash_lines.append(content or None)
+            if len(hash_lines) >= 2:
+                break
+    fragment = hash_lines[0] if len(hash_lines) >= 1 else None
+    action = hash_lines[1] if len(hash_lines) >= 2 else None
+    return fragment, action
 
 
-_DEFAULT_TEMPLATE = "擬:\n<承辦文字>陳閱後文存查。"
+def _load_config(config_path=CONFIG_PATH):
+    """讀 yaml 設定,回 (default, template)。
 
-
-def _load_rules(config_path=CONFIG_PATH):
-    """讀 yaml 設定,回 (rules, default, template)。
-
-    rules:list of dict(標記/承辦文字/動作),依 yaml 順序(越上方越優先);
-    default:dict(承辦文字/動作);template:str(含 `<承辦文字>` placeholder)。
+    default:dict(承辦文字/動作) — 當 summary 第二/三行缺欄時的 fallback。
+    template:str — 含 `<承辦文字>` placeholder。
+    舊架構的 rules 已棄用(承辦文字+動作改成由 *總結*.md 直接決定)。
     """
     with open(config_path, encoding="utf-8") as f:
         cfg = yaml.safe_load(f) or {}
-    rules = cfg.get("rules") or []
     default = cfg.get("default") or {"承辦文字": "", "動作": "none"}
     template = cfg.get("template") or _DEFAULT_TEMPLATE
-    return rules, default, template
-
-
-def _lookup(marks, rules, default):
-    """依 yaml 順序掃描 rules,第一個 `標記 in marks` 命中決定一切(越上方越優先)。
-
-    全部沒命中 → 回 default 的 (承辦文字, 動作)。
-    """
-    for rule in rules:
-        if rule.get("標記") in marks:
-            return rule.get("承辦文字", ""), rule.get("動作", "none")
-    return default.get("承辦文字", ""), default.get("動作", "none")
+    return default, template
 
 
 def _render(template, fragment):
@@ -248,11 +252,14 @@ def fill_in_draft(driver, extract_dir, config_path=CONFIG_PATH):
     全程不 raise:任何例外都記 log 並回 False,不影響 4-1 已完成的下載/總結。
     """
     try:
-        marks = _read_marks(extract_dir)
-        rules, default, template = _load_rules(config_path)
-        fragment, action = _lookup(marks, rules, default)
+        fragment, action = _read_action(extract_dir)
+        default, template = _load_config(config_path)
+        if fragment is None:
+            fragment = default.get("承辦文字", "")
+        if action is None:
+            action = default.get("動作", "none")
         text = _render(template, fragment)
-        print(f"[fill_in_draft] 標記={marks} → 動作={action},承辦文字={text!r}")
+        print(f"[fill_in_draft] 承辦文字={fragment!r} 動作={action!r} → text={text!r}")
 
         if not _fill_text(driver, text):
             print("[fill_in_draft] 填承辦文字失敗,中止(不儲存、不動作)。")
