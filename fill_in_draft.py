@@ -106,19 +106,33 @@ def fill_in_draft(driver, extract_dir, config_path=CONFIG_PATH):
         return False
 
 
+def _dry_run(extract_dir, config_path=CONFIG_PATH):
+    """乾跑:只讀標記+查表,印出「會填什麼/會執行什麼動作」,不做 Selenium。
+
+    用途:給某個既有 extract_dir(已有 *總結*.md),驗證 yaml 規則是否如預期。
+    Selenium 真實操作交由 main.py 主流程跑到 pending_doc_handler 時自然觸發。
+    """
+    extract_dir = pathlib.Path(extract_dir)
+    marks = _read_marks(extract_dir)
+    rules, default = _load_rules(config_path)
+    text, action = _lookup(marks, rules, default)
+    print(f"[fill_in_draft] extract_dir={extract_dir}")
+    print(f"[fill_in_draft] 標記={marks}")
+    print(f"[fill_in_draft] → 動作={action}")
+    print(f"[fill_in_draft] → 辦理文字={text!r}")
+    return text, action
+
+
 if __name__ == "__main__":
+    # standalone:給一個既有 extract_dir(預設 document_download/<doc_no>/),
+    # 跑乾跑模式印出「將填什麼/將執行什麼」。不開 Chrome、不做 Selenium 操作。
+    # 真實 4-2 整合測試請跑 `python main.py`(cascade → pending_doc_handler →
+    # 4-2 自然觸發),或在 Chrome 已停在公文閱覽器分頁時以 driver attach 接續。
     import sys
 
-    from taipeion_login_selenium import _setup_stdout_logging
-    _setup_stdout_logging()
-
-    from document_system import (
-        _standalone_open_chrome_at_edoc,
-        process_document_system,
-    )
-    driver = _standalone_open_chrome_at_edoc()
-    if driver is None:
+    if len(sys.argv) < 2:
+        print("用法: python fill_in_draft.py <extract_dir>")
+        print("  乾跑某筆已下載+總結的公文,印出 4-2 會填的辦理文字與動作。")
+        print("  例: python fill_in_draft.py document_download\\MWAA1156005008")
         sys.exit(1)
-    # process_document_system → cascade → pending_doc → handle_opened_document
-    # 內已 chain 呼叫 fill_in_draft,本入口跑完整路徑即可。
-    process_document_system(driver)
+    _dry_run(sys.argv[1])
