@@ -104,3 +104,21 @@ def fill_in_draft(driver, extract_dir, config_path=CONFIG_PATH):
     except Exception as e:
         print(f"[fill_in_draft] 例外(不影響 4-1):{type(e).__name__}: {e}")
         return False
+
+
+if __name__ == "__main__":
+    import sys
+
+    from taipeion_login_selenium import _setup_stdout_logging
+    _setup_stdout_logging()
+
+    from document_system import (
+        _standalone_open_chrome_at_edoc,
+        process_document_system,
+    )
+    driver = _standalone_open_chrome_at_edoc()
+    if driver is None:
+        sys.exit(1)
+    # process_document_system → cascade → pending_doc → handle_opened_document
+    # 內已 chain 呼叫 fill_in_draft,本入口跑完整路徑即可。
+    process_document_system(driver)

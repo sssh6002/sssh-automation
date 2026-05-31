@@ -955,7 +955,18 @@ def handle_opened_document(driver):
     else:
         print("[pending_doc_handler] 下載完成 (非 zip,沒解壓縮)")
 
-    # TODO:在公文閱覽器內做後續動作 (檢視內容/簽辦/送件/結案等)
+    # 4-2:依公文標記擬寫辦理文字、儲存、依標記決定不動作/陳會。
+    # 容錯:fill_in_draft 不 raise,失敗只回 False,不影響已完成的下載/總結。
+    if extract_dir:
+        try:
+            from fill_in_draft import fill_in_draft
+            if fill_in_draft(driver, extract_dir):
+                print("[pending_doc_handler] 4-2 擬辦完成")
+            else:
+                print("[pending_doc_handler] 4-2 擬辦未完成(詳見上方 log),留待人工")
+        except Exception as e:
+            print(f"      [WARN] fill_in_draft 呼叫失敗(不影響下載流程):"
+                  f"{type(e).__name__}: {e}")
     return True
 
 
