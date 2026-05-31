@@ -8,7 +8,10 @@
 import pathlib
 import re
 
+import time
+
 import yaml
+from selenium.common.exceptions import StaleElementReferenceException
 from selenium.webdriver.common.by import By
 from selenium.webdriver.support.ui import WebDriverWait
 
@@ -143,16 +146,32 @@ def _save(driver):
         return False
 
 
-def _click_chen_hui(driver):
-    """點「陳會」鈕(div.x-button 內含 span.x-button-label='陳會')。回 True/False。"""
+def _click_chen_hui(driver, timeout=15):
+    """點「陳會」鈕(div.x-button 內含 span.x-button-label='陳會')。回 True/False。
+
+    陳會緊接在 _save 後點 — 儲存會觸發 ExtJS 重繪(gbDocflowId 重新分配),
+    若 cached element ref 在重繪後 click,會拋 StaleElementReferenceException。
+    這裡每輪都 fresh find + click,catch stale 後重試,直到 timeout 才放棄。
+    """
     try:
         driver.switch_to.default_content()
         xp = _BUTTON_BY_LABEL_XPATH.format(label="陳會")
-        btn = WebDriverWait(driver, 15).until(
-            lambda d: next((b for b in d.find_elements(By.XPATH, xp) if b.is_displayed()), False)
-        )
-        btn.click()
-        return True
+        deadline = time.monotonic() + timeout
+        last_err = None
+        while time.monotonic() < deadline:
+            try:
+                btn = next((b for b in driver.find_elements(By.XPATH, xp)
+                            if b.is_displayed()), None)
+                if btn is None:
+                    time.sleep(0.3)
+                    continue
+                btn.click()
+                return True
+            except StaleElementReferenceException as e:
+                last_err = e
+                time.sleep(0.2)
+        print(f"[fill_in_draft] _click_chen_hui 超時({timeout}s),最後例外:{last_err!r}")
+        return False
     except Exception as e:
         print(f"[fill_in_draft] _click_chen_hui 失敗:{type(e).__name__}: {e}")
         return False
