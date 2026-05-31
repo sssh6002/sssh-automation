@@ -6,11 +6,14 @@ import fill_in_draft
 
 
 _SAMPLE_CONFIG = {
-    "default": {"辦理文字": "擬:", "動作": "none"},
+    "template": "擬:\n<辦理文字>陳閱後文存查。",
+    "default": {"辦理文字": "", "動作": "none"},
+    # rules 越上方越優先;測試裡刻意把「不參加」放在「資安」之前,
+    # 跟現實 yaml 順序一致。
     "rules": [
-        {"標記": "資安", "優先序": 20, "辦理文字": "陳會文字", "動作": "陳會"},
-        {"標記": "不參加", "優先序": 10, "辦理文字": "不參加文字", "動作": "none"},
-        {"標記": "汰換", "優先序": 30, "辦理文字": "汰換文字", "動作": "備選動作"},
+        {"標記": "不參加", "辦理文字": "不參加，", "動作": "none"},
+        {"標記": "資安", "辦理文字": "陳會片段，", "動作": "陳會"},
+        {"標記": "汰換", "辦理文字": "汰換片段，", "動作": "備選動作"},
     ],
 }
 
@@ -56,31 +59,43 @@ def test_read_marks_single_mark(tmp_path):
     assert fill_in_draft._read_marks(tmp_path) == ["汰換"]
 
 
-def test_load_rules_returns_rules_and_default(tmp_path):
-    rules, default = fill_in_draft._load_rules(_write_config(tmp_path))
-    assert default == {"辦理文字": "擬:", "動作": "none"}
+def test_load_rules_returns_rules_default_template(tmp_path):
+    rules, default, template = fill_in_draft._load_rules(_write_config(tmp_path))
+    assert default == {"辦理文字": "", "動作": "none"}
     assert len(rules) == 3
+    assert template == "擬:\n<辦理文字>陳閱後文存查。"
 
 
-def test_lookup_first_match_by_priority_wins(tmp_path):
-    rules, default = fill_in_draft._load_rules(_write_config(tmp_path))
+def test_lookup_first_in_yaml_order_wins(tmp_path):
+    # yaml 內「不參加」在「資安」前 → 兩個標記同時存在時取上方的「不參加」
+    rules, default, _ = fill_in_draft._load_rules(_write_config(tmp_path))
     text, action = fill_in_draft._lookup(["資安", "不參加"], rules, default)
-    assert (text, action) == ("不參加文字", "none")
+    assert (text, action) == ("不參加，", "none")
 
 
 def test_lookup_single_mark_hits_its_rule(tmp_path):
-    rules, default = fill_in_draft._load_rules(_write_config(tmp_path))
-    assert fill_in_draft._lookup(["資安"], rules, default) == ("陳會文字", "陳會")
+    rules, default, _ = fill_in_draft._load_rules(_write_config(tmp_path))
+    assert fill_in_draft._lookup(["資安"], rules, default) == ("陳會片段，", "陳會")
 
 
 def test_lookup_no_match_falls_back_to_default(tmp_path):
-    rules, default = fill_in_draft._load_rules(_write_config(tmp_path))
-    assert fill_in_draft._lookup(["不存在的標記"], rules, default) == ("擬:", "none")
+    rules, default, _ = fill_in_draft._load_rules(_write_config(tmp_path))
+    assert fill_in_draft._lookup(["不存在的標記"], rules, default) == ("", "none")
 
 
 def test_lookup_empty_marks_falls_back_to_default(tmp_path):
-    rules, default = fill_in_draft._load_rules(_write_config(tmp_path))
-    assert fill_in_draft._lookup([], rules, default) == ("擬:", "none")
+    rules, default, _ = fill_in_draft._load_rules(_write_config(tmp_path))
+    assert fill_in_draft._lookup([], rules, default) == ("", "none")
+
+
+def test_render_substitutes_placeholder():
+    assert (fill_in_draft._render("擬:\n<辦理文字>陳閱後文存查。", "不參加，")
+            == "擬:\n不參加，陳閱後文存查。")
+
+
+def test_render_empty_fragment_yields_clean_template():
+    assert (fill_in_draft._render("擬:\n<辦理文字>陳閱後文存查。", "")
+            == "擬:\n陳閱後文存查。")
 
 
 def _patch_selenium(monkeypatch, calls, fill_ok=True, save_ok=True, chen_ok=True):
@@ -99,7 +114,7 @@ def test_fill_in_draft_action_none_fills_saves_no_action(tmp_path, monkeypatch):
     _patch_selenium(monkeypatch, calls)
     ok = fill_in_draft.fill_in_draft(driver=None, extract_dir=tmp_path, config_path=cfg)
     assert ok is True
-    assert calls == [("fill", "不參加文字"), ("save",)]
+    assert calls == [("fill", "擬:\n不參加，陳閱後文存查。"), ("save",)]
 
 
 def test_fill_in_draft_action_chen_hui_clicks_after_save(tmp_path, monkeypatch):
@@ -109,7 +124,7 @@ def test_fill_in_draft_action_chen_hui_clicks_after_save(tmp_path, monkeypatch):
     _patch_selenium(monkeypatch, calls)
     ok = fill_in_draft.fill_in_draft(driver=None, extract_dir=tmp_path, config_path=cfg)
     assert ok is True
-    assert calls == [("fill", "陳會文字"), ("save",), ("chen_hui",)]
+    assert calls == [("fill", "擬:\n陳會片段，陳閱後文存查。"), ("save",), ("chen_hui",)]
 
 
 def test_fill_in_draft_backup_action_is_noop(tmp_path, monkeypatch):
@@ -119,7 +134,7 @@ def test_fill_in_draft_backup_action_is_noop(tmp_path, monkeypatch):
     _patch_selenium(monkeypatch, calls)
     ok = fill_in_draft.fill_in_draft(driver=None, extract_dir=tmp_path, config_path=cfg)
     assert ok is True
-    assert calls == [("fill", "汰換文字"), ("save",)]
+    assert calls == [("fill", "擬:\n汰換片段，陳閱後文存查。"), ("save",)]
 
 
 def test_fill_in_draft_no_marks_uses_default_template(tmp_path, monkeypatch):
@@ -128,7 +143,7 @@ def test_fill_in_draft_no_marks_uses_default_template(tmp_path, monkeypatch):
     _patch_selenium(monkeypatch, calls)
     ok = fill_in_draft.fill_in_draft(driver=None, extract_dir=tmp_path, config_path=cfg)
     assert ok is True
-    assert calls == [("fill", "擬:"), ("save",)]
+    assert calls == [("fill", "擬:\n陳閱後文存查。"), ("save",)]
 
 
 def test_fill_in_draft_fill_fails_returns_false_no_save(tmp_path, monkeypatch):
@@ -138,7 +153,7 @@ def test_fill_in_draft_fill_fails_returns_false_no_save(tmp_path, monkeypatch):
     _patch_selenium(monkeypatch, calls, fill_ok=False)
     ok = fill_in_draft.fill_in_draft(driver=None, extract_dir=tmp_path, config_path=cfg)
     assert ok is False
-    assert calls == [("fill", "陳會文字")]
+    assert calls == [("fill", "擬:\n陳會片段，陳閱後文存查。")]
 
 
 def test_fill_in_draft_save_fails_returns_false_no_action(tmp_path, monkeypatch):
@@ -148,4 +163,4 @@ def test_fill_in_draft_save_fails_returns_false_no_action(tmp_path, monkeypatch)
     _patch_selenium(monkeypatch, calls, save_ok=False)
     ok = fill_in_draft.fill_in_draft(driver=None, extract_dir=tmp_path, config_path=cfg)
     assert ok is False
-    assert calls == [("fill", "陳會文字"), ("save",)]
+    assert calls == [("fill", "擬:\n陳會片段，陳閱後文存查。"), ("save",)]

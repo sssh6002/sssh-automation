@@ -39,27 +39,37 @@ def _read_marks(extract_dir):
     return []
 
 
-def _load_rules(config_path=CONFIG_PATH):
-    """讀 yaml 設定,回 (rules, default)。
+_DEFAULT_TEMPLATE = "擬:\n<辦理文字>陳閱後文存查。"
 
-    rules:list of dict(標記/優先序/辦理文字/動作);default:dict(辦理文字/動作)。
+
+def _load_rules(config_path=CONFIG_PATH):
+    """讀 yaml 設定,回 (rules, default, template)。
+
+    rules:list of dict(標記/辦理文字/動作),依 yaml 順序(越上方越優先);
+    default:dict(辦理文字/動作);template:str(含 `<辦理文字>` placeholder)。
     """
     with open(config_path, encoding="utf-8") as f:
         cfg = yaml.safe_load(f) or {}
     rules = cfg.get("rules") or []
-    default = cfg.get("default") or {"辦理文字": "擬:", "動作": "none"}
-    return rules, default
+    default = cfg.get("default") or {"辦理文字": "", "動作": "none"}
+    template = cfg.get("template") or _DEFAULT_TEMPLATE
+    return rules, default, template
 
 
 def _lookup(marks, rules, default):
-    """依優先序由小到大掃描 rules,第一個 `標記 in marks` 命中的決定一切。
+    """依 yaml 順序掃描 rules,第一個 `標記 in marks` 命中決定一切(越上方越優先)。
 
     全部沒命中 → 回 default 的 (辦理文字, 動作)。
     """
-    for rule in sorted(rules, key=lambda r: r.get("優先序", 0)):
+    for rule in rules:
         if rule.get("標記") in marks:
             return rule.get("辦理文字", ""), rule.get("動作", "none")
     return default.get("辦理文字", ""), default.get("動作", "none")
+
+
+def _render(template, fragment):
+    """套用模板:把 `<辦理文字>` placeholder 換成 fragment。"""
+    return template.replace("<辦理文字>", fragment)
 
 
 # 公文閱覽器 ExtJS 元素選擇器(2026-05-31 實機 dump 鎖定):
@@ -223,8 +233,9 @@ def fill_in_draft(driver, extract_dir, config_path=CONFIG_PATH):
     """
     try:
         marks = _read_marks(extract_dir)
-        rules, default = _load_rules(config_path)
-        text, action = _lookup(marks, rules, default)
+        rules, default, template = _load_rules(config_path)
+        fragment, action = _lookup(marks, rules, default)
+        text = _render(template, fragment)
         print(f"[fill_in_draft] 標記={marks} → 動作={action},辦理文字={text!r}")
 
         if not _fill_text(driver, text):
