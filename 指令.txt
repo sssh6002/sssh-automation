@@ -1,9 +1,9 @@
 C:\Python314\python.exe  C:\Users\ldc\Documents\GitHub\sssh-automation\main.py  主程式
 C:\Python314\python.exe  C:\Users\ldc\Documents\GitHub\sssh-automation\summarize_doc.py 總結\document_download內所有目錄的公文檔 
 C:\Python314\python.exe  C:\Users\ldc\Documents\GitHub\sssh-automation\summarize_doc.py C:\Users\ldc\Documents\GitHub\sssh-automation\document_download\MWxxx 同上，但為單一目錄
-C:\Users\ldc\Documents\GitHub\sssh-automation> C:\Python314\python.exe  C:\Users\ldc\Documents\GitHub\sssh-automation\document_closure\document_closure.py 點入待結案
-
-發現若只summarize_doc.py，會總結\document_download內所有目錄的公文檔，但main.py只會做承辦中的第一筆，雖然這是我要的，但很奇怪260528 
+C:\Python314\python.exe  C:\Users\ldc\Documents\GitHub\sssh-automation\document_closure\document_closure.py 點入待結案
+「繼續 document_closure」
+發現:若只summarize_doc.py，會總結\document_download內所有目錄的公文檔，但main.py只會做承辦中的第一筆，雖然這是我要的，但很奇怪260528 
 
 rm C:\Users\ldc\Documents\GitHub\sssh-automation\document_download\**\*.md, C:\Users\ldc\Documents\GitHub\sssh-automation\document_download\**\*.txt
 
