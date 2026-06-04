@@ -753,7 +753,7 @@ def _handle_pincode_popup(driver, popup_timeout=15, close_timeout=20):
 
     流程(全自動,任一步失敗就停):
     1. 等新 window 出現(popup_timeout 秒),switch 過去
-    2. 讀 PIN from id.txt(失敗 → 停)
+    2. 讀 PIN from env.env(失敗 → 停)
     3. 找 pinCode input(失敗 → 停)
     4. _fill_pincode_robust 多策略填入 PIN(全部失敗 → 停)
     5. 點「確定」(失敗 → 停)
@@ -821,7 +821,7 @@ def _handle_pincode_popup(driver, popup_timeout=15, close_timeout=20):
 
     pin = _read_pin()
     if not pin:
-        print("[ERROR] 讀不到 PIN(id.txt 不存在/空),popup 保留供手動處理。")
+        print("[ERROR] 讀不到 PIN(env.env 不存在/無 pin=),popup 保留供手動處理。")
         try:
             driver.switch_to.window(original_handle)
         except Exception:
@@ -1533,7 +1533,7 @@ def _process_one_pending_closure_doc(driver):
     # 自動處理失敗(找不到 input / PIN 填不進去 / 找不到確定按鈕等)→ 程式停止自動
     # 操作,但**不中止主流程** — 等使用者手動完成後,下一步 verify 仍會抓到
     # doc_no 從清單消失,順利寫存查標記檔。
-    print("[document_closure] 等 pinCode 視窗、自動填 PIN(讀 id.txt)、按確定...")
+    print("[document_closure] 等 pinCode 視窗、自動填 PIN(讀 env.env)、按確定...")
     pin_auto_ok = _handle_pincode_popup(driver)
     if not pin_auto_ok:
         print("[WARN] 自動 pinCode 處理未完成 — 若 popup 仍開著,請手動填 PIN + 按確定")

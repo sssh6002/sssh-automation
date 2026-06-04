@@ -22,7 +22,8 @@ run.log.*
 debug.log
 final_state.png
 
-# 自然人憑證 PIN（嚴禁推上 GitHub）
+# 帳密設定（PIN／校網帳密，嚴禁推上 GitHub）
+env.env
 id.txt
 
 #目錄

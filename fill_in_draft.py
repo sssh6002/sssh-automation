@@ -319,7 +319,7 @@ def fill_in_draft(driver, extract_dir, config_path=CONFIG_PATH):
             # 陳會送出 → 系統開 localhost:16888/doPostMsg pinCode 對話框,需 PIN 簽章
             if not _handle_chen_hui_pincode(driver):
                 _print_stop_banner("陳會 pinCode 對話框處理失敗(公文未送出)",
-                                   "請手動在 pinCode 對話框輸入 PIN 並按確定;確認 id.txt 內容正確")
+                                   "請手動在 pinCode 對話框輸入 PIN 並按確定;確認 env.env 內容正確")
                 return False
         elif action == "none":
             pass

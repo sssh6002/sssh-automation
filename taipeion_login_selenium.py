@@ -8,7 +8,7 @@ taipeion_login_selenium.py
   - 用 pyautogui 點 Chrome 站台權限對話框「允許」按鈕（Chrome 瀏覽器級 UI，
     無法用 Selenium 點，且授權後 Chrome 會記住，下次同 origin 不再跳）
   - 用 JS 點擊（execute_script）繞過頁面遮罩
-  - 自動讀 id.txt 填 PIN 並送出登入；卡片偵測失敗時自動點「重新檢測」重試
+  - 自動讀 env.env 填 PIN 並送出登入；卡片偵測失敗時自動點「重新檢測」重試
 
 注意：本流程必須在「螢幕未鎖定」狀態下執行 — Windows 鎖屏會阻擋
 Smart Card API，HiCOS 無法讀卡。
@@ -59,8 +59,8 @@ PIN_INPUT_XPATHS = [
 # 卡片偵測失敗時頁面會出現的兩個獨立按鈕（兩個都要點）
 RECHECK_BUTTONS = ["重新檢測", "重新偵測卡片"]
 
-# PIN 從 id.txt 讀。檔案不應該 commit（已在 .gitignore）。
-PIN_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "id.txt")
+# 帳密設定從 env.env 讀（key=value 一行一筆、# 開頭為註解）。檔案不應該 commit（已在 .gitignore）。
+ENV_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "env.env")
 
 
 def _mark_profile_clean_exit():
@@ -426,21 +426,50 @@ def _grant_clipboard_permission(driver):
         print(f"      [WARN] CDP grant clipboard 失敗：{type(e).__name__}: {e}")
 
 
-def _read_pin():
-    """從 id.txt 讀 PIN，回傳字串；檔案不存在或空白時回傳 None。"""
-    if not os.path.isfile(PIN_FILE):
-        print(f"      [警告] 找不到 PIN 檔：{PIN_FILE}，需要手動輸入 PIN")
+def _read_config(key):
+    """從 env.env 讀指定 key 的值（key=value 一行一筆，# 開頭整行為註解、空行略過）。
+
+    回傳值字串（strip 過）；檔案不存在、找不到 key 或讀檔失敗時回傳 None。
+    """
+    if not os.path.isfile(ENV_FILE):
         return None
     try:
-        with open(PIN_FILE, "r", encoding="utf-8") as f:
-            pin = f.read().strip()
-        if not pin:
-            print(f"      [警告] PIN 檔內容為空，需要手動輸入 PIN")
-            return None
+        with open(ENV_FILE, "r", encoding="utf-8") as f:
+            for line in f:
+                line = line.strip()
+                if not line or line.startswith("#") or "=" not in line:
+                    continue
+                k, _, v = line.partition("=")
+                if k.strip() == key:
+                    return v.strip()
+    except Exception as e:
+        print(f"      [警告] 讀取 env.env 失敗：{e}")
+    return None
+
+
+def _read_pin():
+    """從 env.env 讀 PIN（pin=...）；回傳字串，找不到/空時回傳 None。
+
+    向後相容舊格式：若 env.env 是「整檔即 PIN」（沒有任何 key=value），
+    則把整檔內容當 PIN。
+    """
+    if not os.path.isfile(ENV_FILE):
+        print(f"      [警告] 找不到設定檔：{ENV_FILE}，需要手動輸入 PIN")
+        return None
+    pin = _read_config("pin")
+    if pin:
         return pin
+    # 向後相容：舊檔為「整檔即 PIN」（無 key=value、非註解）
+    try:
+        with open(ENV_FILE, "r", encoding="utf-8") as f:
+            raw = f.read().strip()
+        if raw and "=" not in raw and not raw.startswith("#"):
+            return raw
     except Exception as e:
         print(f"      [警告] 讀取 PIN 失敗：{e}")
         return None
+    print(f"      [警告] env.env 內無 pin=，需要手動輸入 PIN")
+    return None
 
 
 def _fill_pin(driver, pin, timeout=3):
@@ -711,7 +740,7 @@ def login_taipeion_selenium(return_driver=False):
     print("[4.5/6] 等讀卡機完成卡片偵測，必要時點重新檢測...")
     _wait_for_login_button(driver)
 
-    print("[5/6] 自動填入 PIN（從 id.txt 讀）...")
+    print("[5/6] 自動填入 PIN（從 env.env 讀）...")
     pin = _read_pin()
     if pin:
         if not _fill_pin(driver, pin):
