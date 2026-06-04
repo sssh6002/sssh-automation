@@ -28,15 +28,25 @@ sys.stdout.reconfigure(encoding='utf-8')
 # edoc 公文首頁。standalone 模式會直接 driver.get 這個 URL。
 EDOC_HOME_URL = "https://edoc.gov.taipei/tcqb/home/default.jsp?inLine=Y"
 
-# 「催辦訊息」badge 的 XPath 候選。實測 DOM 結構未明，由窄到寬列幾個 fallback，
-# 邏輯同 click_document.py 的 DOCUMENT_XPATHS。
+# 「催辦訊息」badge 的 XPath 候選。
+# 實測 (2026-06-04 top-level DOM)：badge 是
+#   <button class="urge" onclick="chgPage('2')"><span class="urge">催辦訊息1</span></button>
+# 兩個關鍵差異讓舊候選全部失效：
+#   1) 是 <button> 不是 <a> → //a[...] 命不中
+#   2) 文字含尾隨數字「催辦訊息1」→ normalize-space()='催辦訊息' 永遠不等
+# 結果只剩最寬的 //*[contains(...)] 命中，但它回傳 document order 第一個 = <html>，
+# JS click <html> 無作用、清單不會載入(原 bug)。故改成精準鎖定 <button>，並把後備
+# 限制在「可點元素」(button/a/role/onclick)，絕不再回傳 html/body 外層容器。
 URGENT_MSG_XPATHS = [
+    "//button[contains(normalize-space(), '催辦訊息')]",     # ← 實測命中 (onclick=chgPage('2'))
+    "//button[contains(@class, 'urge')]",
+    "//*[contains(@class,'urge') and contains(normalize-space(), '催辦訊息')]",
     "//a[contains(normalize-space(), '催辦訊息')]",
     "//*[normalize-space()='催辦訊息']/ancestor::a[1]",
     "//*[normalize-space()='催辦訊息']/ancestor::*[@role='link' or @role='button'][1]",
-    "//*[normalize-space()='催辦訊息']/ancestor::div[contains(@class, 'badge') or contains(@class, 'btn') or contains(@class, 'tag') or contains(@class, 'pill')][1]",
-    "//*[normalize-space()='催辦訊息']",
-    "//*[contains(normalize-space(), '催辦訊息')]",
+    # 後備：含「催辦訊息」且本身可點的元素(排除 html/body/純容器 div)
+    "//*[contains(normalize-space(), '催辦訊息') and "
+    "(self::button or self::a or @role='button' or @onclick)]",
 ]
 
 # （左側 sidebar 各項 menu item 「<label>(N)」格式的 XPath 由
