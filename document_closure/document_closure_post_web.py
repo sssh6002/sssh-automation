@@ -20,11 +20,10 @@ import time
 from datetime import datetime
 
 # 校網首頁(判登入/登出狀態)與發佈板。
-# 發佈板=圖書館的「公告文件」(NetworkCenterAnnoucement):library 本頁的「新增公告」
-# 只在 NSS CMS 編輯模式才有,但 library 的「公告文件」連結就是這個 URL、直接導覽即有
-# 「新增公告」鈕、可自動化(2026-06-06 實機驗證)。
+# 發佈板=圖書館頁(/nss/s/main/p/library)的「圖書館公告」模組。需先點上方 admin bar
+# 的「模組」進編輯模式,該模組才會出現「新增公告」鈕(2026-06-06 實機驗證)。
 HOME_URL = "https://www.sssh.tp.edu.tw/nss/p/index"
-ANNO_URL = "https://www.sssh.tp.edu.tw/nss/s/main/p/NetworkCenterAnnoucement"
+ANNO_URL = "https://www.sssh.tp.edu.tw/nss/s/main/p/library"
 
 # 觸發關鍵字：總結「承辦文字」(## 行) 含此字串才發佈到校網。
 ANNOUNCE_KEYWORD = "於官網公告"
@@ -223,7 +222,19 @@ def _submit_announcement(driver, title, body):
         driver.get(ANNO_URL)
         time.sleep(2)
 
-        # 輪詢等「新增公告」鈕(圖書館公告模組可能 async 載入),最多 ~10s
+        # /library 的「圖書館公告」模組要先進「模組」編輯模式才會出現「新增公告」。
+        # 若目前沒有「新增公告」鈕,點上方 admin bar 的「模組」切換編輯模式。
+        has_add = driver.execute_script(
+            "return [...document.querySelectorAll('button,a')]"
+            ".some(b => (b.innerText||'').trim() === '新增公告');")
+        if not has_add:
+            driver.execute_script("""
+                for (const e of document.querySelectorAll('a,button,span,i')) {
+                    if ((e.innerText||'').trim() === '模組') { e.click(); return; }
+                }""")
+            time.sleep(2)
+
+        # 輪詢等「新增公告」鈕出現(編輯模式 + 模組 async),最多 ~10s,點它
         clicked = False
         for _ in range(20):
             clicked = driver.execute_script("""
@@ -235,7 +246,7 @@ def _submit_announcement(driver, title, body):
                 break
             time.sleep(0.5)
         if not clicked:
-            _stop_banner("找不到「新增公告」按鈕(此帳號可能無權限,或圖書館公告模組未載入)")
+            _stop_banner("找不到「新增公告」按鈕(圖書館公告模組/模組編輯模式未就緒)")
             return False
         time.sleep(2.5)
 
