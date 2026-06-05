@@ -125,6 +125,7 @@ def test_parse_summary_missing_file_returns_none(tmp_path):
     assert _parse_summary(str(d)) is None
 
 
+import document_closure.document_closure_post_web as pw
 from document_closure.document_closure_post_web import _body_to_html
 
 
@@ -138,3 +139,29 @@ def test_body_to_html_skips_blank_lines():
 
 def test_body_to_html_escapes_html_chars():
     assert _body_to_html("a < b & c") == "<p>a &lt; b &amp; c</p>"
+
+
+def _make_doc_dir(tmp_path, base="12345_678"):
+    d = tmp_path / "MWAA_x"
+    d.mkdir()
+    (d / f"{base}內容.txt").write_text("x", encoding="utf-8")  # 供 _find_main_doc_basename
+    return d, base
+
+
+def test_posted_marker_path_uses_main_basename(tmp_path):
+    d, base = _make_doc_dir(tmp_path)
+    assert pw._posted_marker_path(str(d)).endswith(f"{base}已公告.txt")
+
+
+def test_posted_marker_path_none_when_no_main_doc(tmp_path):
+    d = tmp_path / "empty"; d.mkdir()
+    assert pw._posted_marker_path(str(d)) is None
+
+
+def test_write_and_detect_posted_marker(tmp_path):
+    d, base = _make_doc_dir(tmp_path)
+    assert pw._already_posted(str(d)) is False
+    p = pw._write_posted_marker(str(d))
+    assert p is not None and (d / f"{base}已公告.txt").is_file()
+    assert (d / f"{base}已公告.txt").read_text(encoding="utf-8").endswith("_已公告")
+    assert pw._already_posted(str(d)) is True

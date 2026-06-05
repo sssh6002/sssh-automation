@@ -16,6 +16,7 @@ import glob
 import html
 import os
 import re
+from datetime import datetime
 
 # 觸發關鍵字：總結「承辦文字」(## 行) 含此字串才發佈到校網。
 ANNOUNCE_KEYWORD = "於官網公告"
@@ -89,3 +90,35 @@ def _body_to_html(body):
     """
     lines = [ln for ln in body.split("\n") if ln.strip()]
     return "".join(f"<p>{html.escape(ln)}</p>" for ln in lines)
+
+
+def _posted_marker_path(extract_dir):
+    """回 <公文主檔名>已公告.txt 完整路徑;找不到主檔名回 None。"""
+    from document_closure.document_closure import _find_main_doc_basename  # 避免循環 import
+    base = _find_main_doc_basename(extract_dir)
+    if not base:
+        return None
+    return os.path.join(extract_dir, f"{base}已公告.txt")
+
+
+def _already_posted(extract_dir):
+    """extract_dir 是否已有 <主檔名>已公告.txt(已公告過)。"""
+    p = _posted_marker_path(extract_dir)
+    return bool(p) and os.path.isfile(p)
+
+
+def _write_posted_marker(extract_dir):
+    """寫 <主檔名>已公告.txt(內容 ISO8601_已公告)。成功回路徑,否則 None。"""
+    p = _posted_marker_path(extract_dir)
+    if not p:
+        print("      [WARN] 找不到公文主檔名,無法寫已公告標記")
+        return None
+    content = datetime.now().strftime("%Y-%m-%dT%H:%M:%S") + "_已公告"
+    try:
+        with open(p, "w", encoding="utf-8") as f:
+            f.write(content)
+        print(f"      OK:已寫已公告標記檔 {os.path.basename(p)}(內容: {content!r})")
+        return p
+    except OSError as e:
+        print(f"      [WARN] 寫已公告標記失敗:{type(e).__name__}: {e}")
+        return None
