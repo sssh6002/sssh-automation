@@ -36,7 +36,7 @@ maybe_post_announcement(driver, extract_dir)
   ├─[3] 防重複：extract_dir 已有 <主檔名>已公告.txt？是→skip 回 True
   ├─[4] title/body 取自 [1]
   ├─[5] _open_and_login_sssh(driver)       開新分頁 + 帳密登入（已登入則跳過）
-  ├─[6] _submit_announcement(driver, title, body)  到 圖書館(/nss/s/main/p/library) 填表「發布」
+  ├─[6] _submit_announcement(driver, title, body)  到 圖書館/公告文件(NetworkCenterAnnoucement) 填表「發布」
   ├─[7] 驗證發佈成功
   ├─[8] _write_posted_marker(extract_dir)  寫 <主檔名>已公告.txt（ISO 8601）
   └─[9] 關新分頁、切回 edoc 主分頁
@@ -76,6 +76,7 @@ maybe_post_announcement(driver, extract_dir)
 pin=自然人憑證PIN
 sssh_account=校網帳號
 sssh_password=校網密碼
+sssh_publisher=系管師R   # 公告「發布者」欄(ct-person 必填,自動化開表單時為空)
 ```
 - `taipeion_login_selenium._read_config(key)`：逐行 key=value 解析（# 註解、空行略過）。
 - `_read_pin()`：先找 `pin=`；若整檔無 key=value（舊格式）則整檔當 PIN（向後相容）。
@@ -101,25 +102,26 @@ sssh_password=校網密碼
 
 ### (c) 發佈 `_submit_announcement(driver, title, body)` — 圖書館/公告文件（2026-06-05 實機驗證）
 
-目標板（使用者指定）：**圖書館** = `https://www.sssh.tp.edu.tw/nss/s/main/p/library`
-的「圖書館公告」模組，登入後該模組出現「新增公告」鈕。
+目標板：**圖書館 → 公告文件** = `https://www.sssh.tp.edu.tw/nss/s/main/p/NetworkCenterAnnoucement`
+（`ANNO_URL`）。註：`/nss/s/main/p/library` 本頁的「新增公告」只在 NSS CMS 編輯模式才出現，
+但 library 的「公告文件」連結就是此 URL，**直接導覽即有「新增公告」鈕、可自動化**（2026-06-06 實機驗證）。
 
-1. 導到上述 URL → **輪詢等**「新增公告」鈕出現（圖書館公告模組可能 async 載入，最多 ~10s）
-   → 點「新增公告」鈕（`button` text == 「新增公告」，JS click）。
+1. 導到 `ANNO_URL` → **輪詢等**「新增公告」鈕出現（最多 ~10s）→ 點它（`button` text == 「新增公告」，JS click）。
 2. 開出 CKEditor 5 表單，填：
    - **標題** `[id^="ct-title-"]`（required）← `title`
-   - **內容** CKEditor 5 `.ck-editor__editable.ck-content`（**contenteditable DIV，非 iframe**）← `body`
-     。優先用 CKEditor instance API 設值；fallback 點「原始碼」鈕切 source 模式貼 HTML。
+   - **內容** CKEditor 5 `.ck-editor__editable.ck-content`（**contenteditable DIV，非 iframe**）← `body`。
+     用 `element.ckeditorInstance.setData(html)`（**實機驗證 api 模式成功**）；fallback `innerHTML`。
+   - **發布者** `[id^="ct-person-"]`（required，**自動化開表單時為空**）← `env.env` 的 `sssh_publisher`。
    - ⚠️ 欄位 id 帶**每次載入變動的隨機後綴**（`ct-title-alro`、`ct-person-t2ib`…）→
-     **一律用前綴比對 `[id^="ct-..."]` 或 label 定位，絕不寫死完整 id**。
-   - 其他 required 欄（`[id^="ct-etAnnoGroup-"]`發布單位、`[id^="ct-person-"]`發布者、
-     `[id^="ct-pdate-"]`發布日期、`ct-ptime-`時間、下架日期…）→ **先用表單預設值**；
-     實作時驗證哪些已預填，僅補「required 且空」者。
+     **一律用前綴比對 `[id^="ct-..."]`，絕不寫死完整 id**。
+   - 其餘 required 欄實機已預填、不需動：`ct-etAnnoGroup-`發布單位（系管師群組）、
+     `ct-pdate-`發布日期（今日）、`ct-ptime-`、`ct-sdate-`下架日期（+1月）、`ct-stime-`。
+     `ct-topEndDate/Time`（置頂結束，未勾置頂不強制）、`ct-insertkey`（關鍵字）**實測留空仍可發布**。
 3. 送出：點「**發布**」鈕（送出區三鈕：「取消」/「存為草稿」/「發布」；使用者選**直接發佈**）。
-4. 驗證發佈成功（回公告清單 / 出現成功提示 / 公告列表含此標題）。失敗→STOP banner 回 False。
+4. 驗證發佈成功：送出後標題框 `[id^="ct-title-"]` 消失（表單關閉）= 成功；仍在 = 必填未過/被擋 → STOP 回 False。
 
 - **送出是對真實校網的不可逆外部動作**：送出前印 banner 列 title；
-  **第一篇在使用者監看下實測確認無誤後才轉全自動**。
+  **第一篇已於 2026-06-06 在使用者監看下實測發布、確認上架無誤**。
 
 ## §4 防重複／log／測試
 
