@@ -36,7 +36,7 @@ maybe_post_announcement(driver, extract_dir)
   ├─[3] 防重複：extract_dir 已有 <主檔名>已公告.txt？是→skip 回 True
   ├─[4] title/body 取自 [1]
   ├─[5] _open_and_login_sssh(driver)       開新分頁 + 帳密登入（已登入則跳過）
-  ├─[6] _submit_announcement(driver, title, body)  到 圖書館/公告文件(NetworkCenterAnnoucement) 填表「發布」
+  ├─[6] _submit_announcement(driver, title, body)  到 圖書館(/nss/s/main/p/library) 填表「發布」
   ├─[7] 驗證發佈成功
   ├─[8] _write_posted_marker(extract_dir)  寫 <主檔名>已公告.txt（ISO 8601）
   └─[9] 關新分頁、切回 edoc 主分頁
@@ -81,13 +81,16 @@ sssh_password=校網密碼
 - `_read_pin()`：先找 `pin=`；若整檔無 key=value（舊格式）則整檔當 PIN（向後相容）。
 - `env.env` 已在 .gitignore。**真實 `sssh_account` / `sssh_password` 由使用者自行填入。**
 
-### (b) 登入 `_open_and_login_sssh(driver)` — 帳密表單（2026-06-05 實機驗證）
+### (b) 登入 `_open_and_login_sssh(driver)` — 帳密表單（2026-06-05 實機驗證 + 使用者指定流程）
 
 校網登入是**單純帳密表單**，無 SSO 轉址、無自然人憑證、無 iframe、無 2FA。
 
-1. 開新分頁、導到 `https://www.sssh.tp.edu.tw/passport/tpeEntrance`。
-2. 先偵測是否已登入：若頁面**無** `#login-user-name`（帳密框）→ 已登入，回 True（同 session 第 2 篇起跳過）。
-3. 否則填表送出：
+**登入偵測依使用者指定**：從首頁 `https://www.sssh.tp.edu.tw/nss/p/index` 看右上角——
+顯示「**登出**」= 已登入（跳過）；顯示「**登入**」= 未登入，點「登入」進登入頁。
+
+1. 開新分頁、導到 `https://www.sssh.tp.edu.tw/nss/p/index`。
+2. 偵測：頁面有「登出」連結 → 已登入，回 True（同 session 第 2 篇起跳過）。
+3. 否則點「登入」連結（JS click）→ 轉到 `/passport/tpeEntrance` 登入頁，填表送出：
    - 帳號框 `#login-user-name`（`name=username`）← `sssh_account`
    - 密碼框 `#login-password`（`name=password`）← `sssh_password`
    - CSRF：`input[name=_csrf]` hidden，瀏覽器自動帶，不用處理
@@ -98,10 +101,11 @@ sssh_password=校網密碼
 
 ### (c) 發佈 `_submit_announcement(driver, title, body)` — 圖書館/公告文件（2026-06-05 實機驗證）
 
-目標板：**圖書館 → 公告文件** = `https://www.sssh.tp.edu.tw/nss/s/main/p/NetworkCenterAnnoucement`
-（已驗證此帳號在此板有「新增公告」權限）。
+目標板（使用者指定）：**圖書館** = `https://www.sssh.tp.edu.tw/nss/s/main/p/library`
+的「圖書館公告」模組，登入後該模組出現「新增公告」鈕。
 
-1. 導到上述 URL → 點「新增公告」鈕（`button` text == 「新增公告」，JS click）。
+1. 導到上述 URL → **輪詢等**「新增公告」鈕出現（圖書館公告模組可能 async 載入，最多 ~10s）
+   → 點「新增公告」鈕（`button` text == 「新增公告」，JS click）。
 2. 開出 CKEditor 5 表單，填：
    - **標題** `[id^="ct-title-"]`（required）← `title`
    - **內容** CKEditor 5 `.ck-editor__editable.ck-content`（**contenteditable DIV，非 iframe**）← `body`
