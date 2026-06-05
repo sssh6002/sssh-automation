@@ -1,20 +1,28 @@
 # document_closure_post_web 設計
 
-日期：2026-06-03
+日期：2026-06-03（2026-06-05 實機探索後更新：登入/發佈 selector、目標板、直接發佈）
 分支：`feat/closure-post-web`
 
 ## 目標
 
 結案存查流程下載並解壓公文後，若該公文目錄的 `*總結.*.md`「承辦文字」含「於官網公告」，
-則自動把公文發佈到松高校網（www.sssh.tp.edu.tw）：以總結的**主旨**為標題、主旨下方的**條列摘要**為內容。
+則自動把公文發佈到松高校網（www.sssh.tp.edu.tw）的**圖書館 → 公告文件**板：
+以總結的**主旨**為標題、主旨下方的**條列摘要**為內容。
 
-## 觸發鏈位置
+## 觸發鏈位置（含「如擬」閘門，第一道已現成）
 
 ```
 document_closure.py  _process_one_pending_closure_doc()
-  └─ _download_and_extract() + _copy_meta_files_from_pending()   ← 既有
-       └─[新]─ document_closure_post_web.maybe_post_announcement(driver, extract_dir)
+  ├─ _has_approval_text()「如擬」判定                            ← 既有閘門(line ~1424)
+  │     核決區無「如擬」→ 保守不動作(可能還在簽核)
+  ├─ _download_and_extract() + _copy_meta_files_from_pending()   ← 既有
+  ├─ 待結案勾選 + 存查表單 + PIN + 驗證歸檔成功                  ← 既有
+  └─[新]─ maybe_post_announcement(driver, extract_dir)          ← 歸檔成功後呼叫
 ```
+
+**「如擬」自動成立**：`_APPROVAL_KEYWORD = "如擬"` 已是結案存查的前置閘門
+（核決區出現「如擬」才下載+存查）。`maybe_post_announcement` 掛在歸檔成功之後，
+能跑到這的公文必為「如擬」核可 → 使用者要求的「等看到如擬再公告」自動滿足，**不需另寫判定**。
 
 `maybe_post_announcement` **不 raise**；任何失敗只印 STOP banner、回 `False`，
 **絕不影響已完成的存查歸檔**（與 `fill_in_draft` 容錯哲學一致）。觸發條件不符回 `False`（skipped，非錯誤）。
@@ -27,8 +35,8 @@ maybe_post_announcement(driver, extract_dir)
   ├─[2] 觸發判定：承辦文字 含「於官網公告」？否→return False(skipped)
   ├─[3] 防重複：extract_dir 已有 <主檔名>已公告.txt？是→skip 回 True
   ├─[4] title/body 取自 [1]
-  ├─[5] _open_and_login_sssh(driver)       開新分頁 + SSO 登入（已登入則跳過）
-  ├─[6] _submit_announcement(driver, title, body)  到 library 頁填表送出
+  ├─[5] _open_and_login_sssh(driver)       開新分頁 + 帳密登入（已登入則跳過）
+  ├─[6] _submit_announcement(driver, title, body)  到 圖書館/公告文件(NetworkCenterAnnoucement) 填表「發布」
   ├─[7] 驗證發佈成功
   ├─[8] _write_posted_marker(extract_dir)  寫 <主檔名>已公告.txt（ISO 8601）
   └─[9] 關新分頁、切回 edoc 主分頁
@@ -73,18 +81,41 @@ sssh_password=校網密碼
 - `_read_pin()`：先找 `pin=`；若整檔無 key=value（舊格式）則整檔當 PIN（向後相容）。
 - `env.env` 已在 .gitignore。**真實 `sssh_account` / `sssh_password` 由使用者自行填入。**
 
-### (b) SSO 登入 `_open_and_login_sssh(driver)`
-1. 開新分頁、導到 `https://www.sssh.tp.edu.tw/passport/tpeEntrance`。
-2. 先偵測是否已登入（同 session 第 2 篇起跳過）：導 library 頁，若沒被導回登入頁 → 已登入回 True。
-3. 否則用 XPath 候選 + JS fallback 找 帳號框 / 密碼框 / 登入鈕，填 `sssh_account` / `sssh_password` 送出。
-4. 驗證登入成功（URL 離開 passport / 能開 library 頁）。失敗→STOP banner 回 False。
-- 真實欄位 selector **實作階段以使用者帳密實機探索 DOM 後再定**。
+### (b) 登入 `_open_and_login_sssh(driver)` — 帳密表單（2026-06-05 實機驗證）
 
-### (c) 發佈 `_submit_announcement(driver, title, body)`
-- 導到 `https://www.sssh.tp.edu.tw/nss/s/main/p/library` → 找「新增公告」入口 → 填標題框、
-  內容編輯器（可能為 rich-text/CKEditor，需 JS 注入或切 iframe）→ 視需要選分類 → 送出。
-- 真實表單結構 **實機探索後再定 selector 與送出流程**。
-- **送出是對真實校網的不可逆外部動作**：送出前印 banner 列 title；自動化跑通前先在使用者監看下實測一篇確認無誤。
+校網登入是**單純帳密表單**，無 SSO 轉址、無自然人憑證、無 iframe、無 2FA。
+
+1. 開新分頁、導到 `https://www.sssh.tp.edu.tw/passport/tpeEntrance`。
+2. 先偵測是否已登入：若頁面**無** `#login-user-name`（帳密框）→ 已登入，回 True（同 session 第 2 篇起跳過）。
+3. 否則填表送出：
+   - 帳號框 `#login-user-name`（`name=username`）← `sssh_account`
+   - 密碼框 `#login-password`（`name=password`）← `sssh_password`
+   - CSRF：`input[name=_csrf]` hidden，瀏覽器自動帶，不用處理
+   - 登入鈕 `button.btn-primary[type=submit]`（text「登入」）→ **必須 JS click**
+     （`element.click()` 會被覆蓋層攔截 `ElementClickInterceptedException`，比照既有 `_js_click`）
+4. 驗證登入成功：送出後 `#login-user-name` 不再存在（仍在 = 帳密錯/2FA/驗證碼 → STOP banner 回 False）；
+   著陸頁右上角「登入」變「登出」。
+
+### (c) 發佈 `_submit_announcement(driver, title, body)` — 圖書館/公告文件（2026-06-05 實機驗證）
+
+目標板：**圖書館 → 公告文件** = `https://www.sssh.tp.edu.tw/nss/s/main/p/NetworkCenterAnnoucement`
+（已驗證此帳號在此板有「新增公告」權限）。
+
+1. 導到上述 URL → 點「新增公告」鈕（`button` text == 「新增公告」，JS click）。
+2. 開出 CKEditor 5 表單，填：
+   - **標題** `[id^="ct-title-"]`（required）← `title`
+   - **內容** CKEditor 5 `.ck-editor__editable.ck-content`（**contenteditable DIV，非 iframe**）← `body`
+     。優先用 CKEditor instance API 設值；fallback 點「原始碼」鈕切 source 模式貼 HTML。
+   - ⚠️ 欄位 id 帶**每次載入變動的隨機後綴**（`ct-title-alro`、`ct-person-t2ib`…）→
+     **一律用前綴比對 `[id^="ct-..."]` 或 label 定位，絕不寫死完整 id**。
+   - 其他 required 欄（`[id^="ct-etAnnoGroup-"]`發布單位、`[id^="ct-person-"]`發布者、
+     `[id^="ct-pdate-"]`發布日期、`ct-ptime-`時間、下架日期…）→ **先用表單預設值**；
+     實作時驗證哪些已預填，僅補「required 且空」者。
+3. 送出：點「**發布**」鈕（送出區三鈕：「取消」/「存為草稿」/「發布」；使用者選**直接發佈**）。
+4. 驗證發佈成功（回公告清單 / 出現成功提示 / 公告列表含此標題）。失敗→STOP banner 回 False。
+
+- **送出是對真實校網的不可逆外部動作**：送出前印 banner 列 title；
+  **第一篇在使用者監看下實測確認無誤後才轉全自動**。
 
 ## §4 防重複／log／測試
 
