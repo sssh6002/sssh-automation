@@ -165,3 +165,59 @@ def test_write_and_detect_posted_marker(tmp_path):
     assert p is not None and (d / f"{base}已公告.txt").is_file()
     assert (d / f"{base}已公告.txt").read_text(encoding="utf-8").endswith("_已公告")
     assert pw._already_posted(str(d)) is True
+
+
+def _doc_dir_with_summary(tmp_path, summary_text, base="12345_678"):
+    d = tmp_path / "MWAA_s"; d.mkdir()
+    (d / f"{base}總結.gemini.md").write_text(summary_text, encoding="utf-8")
+    (d / f"{base}內容.txt").write_text("x", encoding="utf-8")
+    return d, base
+
+
+def test_maybe_post_skips_when_not_triggered(tmp_path, monkeypatch):
+    d, _ = _doc_dir_with_summary(tmp_path, OLD_FORMAT)  # 承辦文字「不參加」
+    called = {"login": False}
+    monkeypatch.setattr(pw, "_open_and_login_sssh", lambda drv: called.__setitem__("login", True) or True)
+    assert pw.maybe_post_announcement(object(), str(d)) is False
+    assert called["login"] is False  # 沒觸發 → 連登入都不做
+
+
+def test_maybe_post_publishes_when_triggered(tmp_path, monkeypatch):
+    d, base = _doc_dir_with_summary(tmp_path, NEW_FORMAT)  # 含「於官網公告」
+    rec = {}
+    monkeypatch.setattr(pw, "_open_and_login_sssh", lambda drv: rec.__setitem__("login", True) or True)
+    monkeypatch.setattr(pw, "_submit_announcement",
+                        lambda drv, t, b: rec.update(title=t, body=b) or True)
+    assert pw.maybe_post_announcement(object(), str(d)) is True
+    assert rec["login"] is True
+    assert rec["title"].startswith("請貴校加強")
+    assert rec["body"].startswith("1. 近期發現")
+    assert (d / f"{base}已公告.txt").is_file()  # 成功後寫標記
+
+
+def test_maybe_post_skips_when_already_posted(tmp_path, monkeypatch):
+    d, base = _doc_dir_with_summary(tmp_path, NEW_FORMAT)
+    (d / f"{base}已公告.txt").write_text("2026-06-05T00:00:00_已公告", encoding="utf-8")
+    called = {"login": False}
+    monkeypatch.setattr(pw, "_open_and_login_sssh", lambda drv: called.__setitem__("login", True) or True)
+    assert pw.maybe_post_announcement(object(), str(d)) is True
+    assert called["login"] is False
+
+
+def test_maybe_post_returns_false_and_no_marker_when_submit_fails(tmp_path, monkeypatch):
+    d, base = _doc_dir_with_summary(tmp_path, NEW_FORMAT)
+    monkeypatch.setattr(pw, "_open_and_login_sssh", lambda drv: True)
+    monkeypatch.setattr(pw, "_submit_announcement", lambda drv, t, b: False)
+    assert pw.maybe_post_announcement(object(), str(d)) is False
+    assert not (d / f"{base}已公告.txt").exists()
+
+
+def test_maybe_post_returns_false_when_login_fails(tmp_path, monkeypatch):
+    d, base = _doc_dir_with_summary(tmp_path, NEW_FORMAT)
+    submit_called = {"v": False}
+    monkeypatch.setattr(pw, "_open_and_login_sssh", lambda drv: False)
+    monkeypatch.setattr(pw, "_submit_announcement",
+                        lambda drv, t, b: submit_called.__setitem__("v", True) or True)
+    assert pw.maybe_post_announcement(object(), str(d)) is False
+    assert submit_called["v"] is False
+    assert not (d / f"{base}已公告.txt").exists()

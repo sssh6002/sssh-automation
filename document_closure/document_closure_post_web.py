@@ -122,3 +122,54 @@ def _write_posted_marker(extract_dir):
     except OSError as e:
         print(f"      [WARN] 寫已公告標記失敗:{type(e).__name__}: {e}")
         return None
+
+
+def _stop_banner(reason, hint=""):
+    """印 STOP banner(發佈段失敗時用,讓 run.log 醒目)。"""
+    print("\n" + "!" * 60)
+    print(f"[post_web][STOP] {reason}")
+    if hint:
+        print(f"[post_web][STOP] 建議:{hint}")
+    print("!" * 60 + "\n")
+
+
+def _open_and_login_sssh(driver):
+    raise NotImplementedError  # Task 4 實作
+
+
+def _submit_announcement(driver, title, body):
+    raise NotImplementedError  # Task 5 實作
+
+
+def maybe_post_announcement(driver, extract_dir):
+    """結案存查歸檔後的發佈入口(掛在 document_closure 歸檔成功之後)。
+
+    - 觸發判定不符(總結承辦文字不含「於官網公告」)→ 回 False(skipped,非錯誤)
+    - 已有「已公告」標記 → 回 True(skip)
+    - 登入或發佈失敗 → 印 STOP banner 回 False(不 raise,絕不影響已完成的存查歸檔)
+    - 成功 → 寫已公告標記、回 True
+    """
+    try:
+        summary = _parse_summary(extract_dir)
+        if not _should_post(summary):
+            return False
+        if _already_posted(extract_dir):
+            print(f"[post_web] {extract_dir} 已有已公告標記,跳過。")
+            return True
+        title, body = summary["title"], summary["body"]
+        print("=" * 60)
+        print("[post_web] 準備發佈公告 → 圖書館/公告文件")
+        print(f"[post_web]   標題: {title}")
+        print("=" * 60)
+        if not _open_and_login_sssh(driver):
+            _stop_banner("校網登入失敗,不發佈")
+            return False
+        if not _submit_announcement(driver, title, body):
+            _stop_banner("公告發佈失敗")
+            return False
+        _write_posted_marker(extract_dir)
+        print(f"[post_web] ✓ 公告已發佈:{title}")
+        return True
+    except Exception as e:
+        _stop_banner(f"maybe_post_announcement 例外:{type(e).__name__}: {e}")
+        return False
