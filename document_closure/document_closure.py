@@ -1553,6 +1553,12 @@ def _process_one_pending_closure_doc(driver):
     if not marker_path:
         print("[WARN] 寫標記檔失敗,但存查已成功(歸檔不受影響)")
 
+    # 歸檔成功後:若總結承辦文字含「於官網公告」→ 發佈到校網圖書館/公告文件。
+    # 此處公文必為「如擬」(前面 _has_approval_text 已過閘),滿足「等如擬再公告」。
+    # maybe_post_announcement 不 raise、失敗只印 STOP,不影響已完成的歸檔。
+    from document_closure.document_closure_post_web import maybe_post_announcement
+    maybe_post_announcement(driver, closure_target)
+
     print(f"[document_closure] ✓ 已完成存查(公文 {doc_no} 歸檔到檔號 {archived_category})")
     print("[document_closure] 結案存查流程結束。")
     return True

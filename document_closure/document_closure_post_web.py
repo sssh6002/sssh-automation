@@ -323,3 +323,28 @@ def maybe_post_announcement(driver, extract_dir):
     except Exception as e:
         _stop_banner(f"maybe_post_announcement 例外:{type(e).__name__}: {e}")
         return False
+
+
+if __name__ == "__main__":
+    import sys
+
+    _ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    if _ROOT not in sys.path:
+        sys.path.insert(0, _ROOT)
+
+    from ime_utils import ensure_english_ime
+    from taipeion_login_selenium import _setup_stdout_logging
+    from fill_in_draft import _attach_existing_chrome
+
+    ensure_english_ime()  # 起手式:把輸入法切回英文
+    _setup_stdout_logging()
+
+    if len(sys.argv) < 2:
+        print("用法: python document_closure/document_closure_post_web.py <公文目錄>")
+        sys.exit(1)
+    extract_dir = sys.argv[1]
+    driver = _attach_existing_chrome()
+    if driver is None:
+        sys.exit(1)
+    ok = maybe_post_announcement(driver, extract_dir)
+    sys.exit(0 if ok else 1)
