@@ -1561,9 +1561,11 @@ def _process_one_pending_closure_doc(driver):
 if __name__ == "__main__":
     # 把 stdout/stderr 同步落地到 run.log — entry point 開頭就 setup，確保
     # Chrome 預清理 / 啟動 / 導航每行 print 都進 log。
+    from ime_utils import ensure_english_ime
     from taipeion_login_selenium import _setup_stdout_logging
     from document_system import _standalone_open_chrome_at_edoc
 
+    ensure_english_ime()  # 起手式:把輸入法切回英文
     _setup_stdout_logging()
     driver = _standalone_open_chrome_at_edoc()
     if driver is None:

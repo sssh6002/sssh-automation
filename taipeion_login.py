@@ -147,6 +147,8 @@ def login_taipeion(save_screenshots=False):
 # ── 直接執行時的進入點 ────────────────────────────────────────────────────────
 
 if __name__ == "__main__":
+    from ime_utils import ensure_english_ime
+    ensure_english_ime()  # 起手式:把輸入法切回英文
     hwnd = login_taipeion(save_screenshots=True)
     if hwnd:
         img, _ = grab_window(hwnd)

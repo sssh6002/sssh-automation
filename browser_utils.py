@@ -23,6 +23,8 @@ import time
 import pyautogui
 from PIL import ImageGrab
 
+from ime_utils import ensure_english_ime
+
 pyautogui.FAILSAFE = False  # 關閉「滑鼠移到角落中止」安全機制，避免自動化中途被打斷
 
 # ── Win32 常數與初始化 ────────────────────────────────────────────────────────
@@ -159,6 +161,7 @@ def type_text(text, interval=0.05):
         text      要輸入的字串（僅支援 ASCII；中文需改用剪貼簿方式）
         interval  每個字元之間的間隔秒數（預設 0.05 秒）
     """
+    ensure_english_ime()  # 先把輸入法切回英文，避免按鍵被中文 IME 攔截組字
     pyautogui.typewrite(text, interval=interval)
 
 

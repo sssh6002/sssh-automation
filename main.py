@@ -23,6 +23,7 @@ from taipeion_login import login_taipeion
 from click_document import click_document_card
 from document_system import process_document_system
 from document_closure.document_closure import process_document_closure
+from ime_utils import ensure_english_ime
 
 # 先把 stdout/stderr 落地到 run.log（與 main.py 同目錄）— 之後所有 print 都會
 # 同步寫進去，下次出問題直接讀檔，不用手動 pipe。在 _close_selenium_chrome_only
@@ -53,6 +54,7 @@ FEATURES = [
 # ── 主程式 ────────────────────────────────────────────────────────────────────
 
 def main():
+    ensure_english_ime()  # 起手式:把輸入法切回英文，避免後續模擬鍵盤輸入被 IME 攔截
     idx = 0
     if len(sys.argv) > 1:
         try:

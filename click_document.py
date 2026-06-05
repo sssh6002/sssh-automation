@@ -245,4 +245,6 @@ def click_document_card(driver=None):
 
 
 if __name__ == "__main__":
+    from ime_utils import ensure_english_ime
+    ensure_english_ime()  # 起手式:把輸入法切回英文
     click_document_card()

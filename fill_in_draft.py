@@ -432,7 +432,9 @@ if __name__ == "__main__":
     #   dump   只 dump 閱覽器各 frame 的辦理面板候選元素,供鎖定選擇器
     import sys
 
+    from ime_utils import ensure_english_ime
     from taipeion_login_selenium import _setup_stdout_logging
+    ensure_english_ime()  # 起手式:把輸入法切回英文
     _setup_stdout_logging()
     if len(sys.argv) > 1 and sys.argv[1] == "dump":
         ok = _standalone_dump()

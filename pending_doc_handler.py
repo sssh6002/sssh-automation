@@ -27,6 +27,8 @@ import zipfile
 
 from selenium.webdriver.common.by import By
 
+from ime_utils import ensure_english_ime
+
 sys.stdout.reconfigure(encoding='utf-8')
 
 # Win32 API:用來找/操作公文系統 KdApp javaw 開的「匯出公文資料」對話框。
@@ -254,6 +256,10 @@ def _handle_export_dialog(download_dir, timeout=30):
     print(f"      OK:找到對話框 hwnd=0x{hwnd:X},拉到前景...")
     _bring_to_front(hwnd)
     time.sleep(0.6)  # 等焦點轉到 Edit 框 (JFileChooser 預設焦點在「資料夾名稱」)
+
+    # 把對話框輸入法切英文,否則路徑會被中文 IME 攔截組字(實測 2026-05-20 變全大寫+截斷)
+    ensure_english_ime(hwnd)
+    time.sleep(0.2)
 
     print(f"      鍵盤:Ctrl+A 全選 → 清空 → 輸入 {download_dir} → Enter")
     _send_ctrl_combo(_VK_A)

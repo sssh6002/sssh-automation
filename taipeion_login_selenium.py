@@ -792,4 +792,6 @@ def login_taipeion_selenium(return_driver=False):
 
 
 if __name__ == "__main__":
+    from ime_utils import ensure_english_ime
+    ensure_english_ime()  # 起手式:把輸入法切回英文
     login_taipeion_selenium()
