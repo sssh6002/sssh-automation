@@ -1013,6 +1013,15 @@ def process_document_system(driver):
         print(f"[ERROR] 當前 URL 不在 edoc：{current}")
         return False
 
+    # ── 殘留清理 ────────────────────────────────────────────────────────────
+    # 跑流程開頭先清掉上次留下的「空 MW* 殘留目錄」(結案刪承辦中目錄時被檔案總管
+    # 鎖住 handle、只清空沒刪殼;此時 explorer 多半已放手,補刪即可)。
+    try:
+        from pending_doc_handler import _sweep_empty_pending_dirs
+        _sweep_empty_pending_dirs()
+    except Exception as e:
+        print(f"[document_system] 殘留目錄清理略過：{type(e).__name__}: {e}")
+
     # ── 催辦訊息 ────────────────────────────────────────────────────────────
     print("[document_system] 讀「催辦訊息」待辦數...")
     urgent_count = _get_urgent_message_count(driver)

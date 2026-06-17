@@ -1114,8 +1114,13 @@ def _force_rmtree(path, attempts=3):
         except OSError as e:
             last_err = e
             time.sleep(0.5)
+    winerr = getattr(last_err, "winerror", None)
+    extra = ""
+    if winerr == 32:
+        extra = "(WinError 32:目錄正被另一程序開著 — 多半是檔案總管仍開在此目錄;" \
+                "內容已清空,空殼資料夾待總管釋放 handle / 重開機後即可移除)"
     print(f"      x  刪除承辦中目錄失敗(重試 {attempts} 次):"
-          f"{type(last_err).__name__}: {last_err}")
+          f"{type(last_err).__name__}: {last_err}{extra}")
     return False
 
 
@@ -1139,6 +1144,17 @@ def _delete_pending_archive(closure_dir):
     if not os.path.isdir(src_dir):
         print(f"      [INFO] 承辦中目錄 {src_dir} 不存在,無需刪除")
         return True
+
+    # 刪除前先關掉開在此目錄(或其下)的檔案總管視窗,否則 Windows 會以 WinError 32
+    # 擋住 os.rmdir(目錄被總管開著)→ 只清空內容、目錄殼層刪不掉(2026-06-17 回報)。
+    try:
+        from pending_doc_handler import _close_explorer_windows_in
+        n = _close_explorer_windows_in(src_dir)
+        if n:
+            print(f"      關閉 {n} 個開在待刪目錄的檔案總管視窗,等其釋放 handle...")
+            time.sleep(0.8)
+    except Exception as e:
+        print(f"      [WARN] 關閉檔案總管視窗失敗(續行刪除):{type(e).__name__}: {e}")
     return _force_rmtree(src_dir)
 
 
@@ -1346,6 +1362,14 @@ def process_document_closure(driver, max_iterations=30):
     delegate 共用同一入口。
     """
     from document_system import _get_sidebar_paren_count
+
+    # 跑流程開頭先清掉上次留下的「空 MW* 殘留目錄」(結案刪承辦中目錄時被檔案總管
+    # 鎖住 handle、只清空沒刪殼;此時 explorer 多半已放手,補刪即可)。
+    try:
+        from pending_doc_handler import _sweep_empty_pending_dirs
+        _sweep_empty_pending_dirs()
+    except Exception as e:
+        print(f"[document_closure] 殘留目錄清理略過：{type(e).__name__}: {e}")
 
     for i in range(1, max_iterations + 1):
         count = _get_sidebar_paren_count(driver, "待結案")

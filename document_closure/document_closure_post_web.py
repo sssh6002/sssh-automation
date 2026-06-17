@@ -12,6 +12,7 @@ document_closure_post_web.py
        py document_closure/document_closure_post_web.py <公文目錄>
 """
 
+import csv
 import glob
 import html
 import os
@@ -144,9 +145,18 @@ def _posted_marker_path(extract_dir):
 
 
 def _already_posted(extract_dir):
-    """extract_dir 是否已有 <主檔名>已公告.txt(已公告過)。"""
-    p = _posted_marker_path(extract_dir)
-    return bool(p) and os.path.isfile(p)
+    """extract_dir 是否已有任何 *已公告.txt → 視為已公告、免再發佈。
+
+    使用者規則(2026-06-17):只要公文夾內出現任何結尾為「已公告.txt」的檔案,就
+    視為已公告、該公文免公告。比舊版只認 <主檔名>已公告.txt 寬鬆:即使抓不到主檔名
+    (_posted_marker_path 回 None)、或標記檔名與主檔名對不上,只要有 *已公告.txt
+    就跳過,避免重複公告;也讓人工手動放一個 *已公告.txt 就能標記「此公文免公告」。
+    """
+    try:
+        names = os.listdir(extract_dir)
+    except OSError:
+        return False
+    return any(n.endswith("已公告.txt") for n in names)
 
 
 def _write_posted_marker(extract_dir, title, board_name, selected_cats):
@@ -178,6 +188,150 @@ def _write_posted_marker(extract_dir, title, board_name, selected_cats):
     except OSError as e:
         print(f"      [WARN] 寫已公告標記失敗:{type(e).__name__}: {e}")
         return None
+
+
+# ── 已公告持久清冊(CSV)────────────────────────────────────────────────────
+# 問題:結案流程每跑一次就把公文重新下載解壓成「全新」資料夾(見
+# document_closure._process_one_pending_closure_doc),所以寫在公文夾內的
+# *已公告.txt 在下次公告判斷時根本不存在 → 重複公告(使用者 2026-06-17 回報)。
+# 解法:在結案根目錄(各公文夾的上層)維護一份持久 CSV 清冊,記錄每筆已發佈公告。
+# 清冊不在任何公文夾內,重新下載/解壓/刪某個公文夾都不會動到它,故能可靠防止
+# 同一公文重複公告;CSV 格式方便日後用 Excel 調閱。
+# 欄位(內容比照 *已公告.txt,每則開頭加公文檔號):
+#   公文檔號(如 MWAA1156005980)、時間、主旨、公告於、同步顯示於
+_LEDGER_FILENAME = "_已公告清單.csv"
+_LEDGER_HEADER = ["公文檔號", "時間", "主旨", "公告於", "同步顯示於"]
+
+
+def _ledger_path(extract_dir):
+    """回已公告清冊完整路徑 = extract_dir 上層(結案根目錄)/_已公告清單.csv。"""
+    closure_root = os.path.dirname(os.path.normpath(os.path.abspath(extract_dir)))
+    return os.path.join(closure_root, _LEDGER_FILENAME)
+
+
+def _doc_no_of(extract_dir):
+    """公文檔號 = 公文夾名(例 MWAA1156005980)。"""
+    return os.path.basename(os.path.normpath(os.path.abspath(extract_dir)))
+
+
+def _ledger_doc_nos(extract_dir):
+    """讀 CSV 清冊回「已公告的公文檔號」set;清冊不存在回空 set。只取第 1 欄。"""
+    out = set()
+    try:
+        with open(_ledger_path(extract_dir), encoding="utf-8-sig", newline="") as f:
+            for row in csv.reader(f):
+                if not row or not row[0] or row[0] == _LEDGER_HEADER[0]:
+                    continue  # 空列或表頭
+                out.add(row[0])
+    except FileNotFoundError:
+        pass
+    except OSError as e:
+        print(f"      [WARN] 讀已公告清冊失敗:{type(e).__name__}: {e}")
+    return out
+
+
+def _append_ledger_row(extract_dir, doc_no, iso, title, board_name, cats_str):
+    """把一列 append 到 CSV 清冊(欄位用 csv 模組正確跳脫,標題含逗號/引號也安全)。
+
+    清冊不存在/為空時先寫表頭(並以 utf-8-sig 寫 BOM,讓 Excel 正確辨識中文);
+    之後追加用 utf-8 不重覆寫 BOM。寫失敗只印 WARN、不丟例外。
+    """
+    path = _ledger_path(extract_dir)
+    try:
+        need_header = (not os.path.exists(path)) or os.path.getsize(path) == 0
+        enc = "utf-8-sig" if need_header else "utf-8"
+        with open(path, "a", encoding=enc, newline="") as f:
+            w = csv.writer(f)
+            if need_header:
+                w.writerow(_LEDGER_HEADER)
+            w.writerow([doc_no, iso, title or "", board_name or "", cats_str or ""])
+        print(f"      OK:已登錄已公告清冊 {doc_no} → {_LEDGER_FILENAME}")
+    except OSError as e:
+        print(f"      [WARN] 寫已公告清冊失敗:{type(e).__name__}: {e}")
+
+
+def _append_to_ledger(extract_dir, doc_no, title, board_name, selected_cats):
+    """成功公告後登錄一列:時間=現在,同步顯示於=selected_cats 以 + 串接(空則「無」)。
+
+    內容與 *已公告.txt(_write_posted_marker)一致,只是改成 CSV 並在最前面加公文檔號。
+    """
+    cats_str = "+".join(selected_cats) if selected_cats else "無"
+    iso = datetime.now().strftime("%Y-%m-%dT%H:%M:%S")
+    _append_ledger_row(extract_dir, doc_no, iso, title, board_name, cats_str)
+
+
+def _read_marker_fields(marker_path):
+    """從一個 *已公告.txt(_write_posted_marker 三行格式)讀回
+    (iso, title, board_name, cats_str);讀不到的欄回空字串。供補登清冊用。
+
+    格式:
+        <iso>_已公告。
+        主旨:<title>
+        公告於:<board>。同步顯示於:<cats>。
+    """
+    iso = title = board = cats = ""
+    try:
+        lines = open(marker_path, encoding="utf-8").read().splitlines()
+    except OSError:
+        return iso, title, board, cats
+    for s in (ln.strip() for ln in lines):
+        if not iso and "_已公告" in s:
+            iso = s.split("_已公告", 1)[0]
+        elif s.startswith("主旨:"):
+            title = s[len("主旨:"):]
+        elif s.startswith("公告於:"):
+            rest = s[len("公告於:"):]
+            if "。同步顯示於:" in rest:
+                board, cats = rest.split("。同步顯示於:", 1)
+                cats = cats.rstrip("。")
+            else:
+                board = rest.rstrip("。")
+    return iso, title, board, cats
+
+
+def _backfill_ledger_from_markers(extract_dir):
+    """一次性補登:結案根目錄下凡有 *已公告.txt 的公文夾,把它補進 CSV 清冊。
+
+    讓「清冊機制上線前就已公告(只留 per-folder *已公告.txt)」的公文也納入防重覆。
+    會解析 *已公告.txt 取回主旨/公告於/同步顯示於,使補登列內容與新列一致。
+    冪等:已在清冊內的公文檔號不重覆寫。任何 I/O 失敗都安靜略過。
+    """
+    root = os.path.dirname(_ledger_path(extract_dir))
+    known = _ledger_doc_nos(extract_dir)
+    try:
+        names = os.listdir(root)
+    except OSError:
+        return
+    for name in sorted(names):
+        sub = os.path.join(root, name)
+        if name in known or not os.path.isdir(sub):
+            continue
+        marker = None
+        try:
+            for f in sorted(os.listdir(sub)):
+                if f.endswith("已公告.txt"):
+                    marker = os.path.join(sub, f)
+                    break
+        except OSError:
+            continue
+        if not marker:
+            continue
+        iso, title, board, cats = _read_marker_fields(marker)
+        _append_ledger_row(extract_dir, name, iso, title, board, cats)
+
+
+def _already_announced(extract_dir):
+    """此公文是否已公告過 → 免再公告。判定來源(任一成立即視為已公告):
+
+    1. 公文夾內有 *已公告.txt(per-folder 標記;使用者也可手動丟一個來標「免公告」)
+    2. 持久清冊內已登錄此公文文號(重新下載成全新資料夾、標記消失時的可靠後盾)
+
+    查清冊前先 _backfill_ledger_from_markers,把舊有只剩 per-folder 標記的公文補進清冊。
+    """
+    _backfill_ledger_from_markers(extract_dir)
+    if _already_posted(extract_dir):
+        return True
+    return _doc_no_of(extract_dir) in _ledger_doc_nos(extract_dir)
 
 
 def _stop_banner(reason, hint=""):
@@ -572,8 +726,8 @@ def maybe_post_announcement(driver, extract_dir):
         summary = _parse_summary(extract_dir)
         if not _should_post(summary):
             return False
-        if _already_posted(extract_dir):
-            print(f"[post_web] {extract_dir} 已有已公告標記,跳過。")
+        if _already_announced(extract_dir):
+            print(f"[post_web] {_doc_no_of(extract_dir)} 已公告過(清冊或 *已公告.txt),跳過。")
             return True
         title, body = summary["title"], summary["body"]
         sync_categories = summary.get("sync_categories") or []
@@ -598,6 +752,10 @@ def maybe_post_announcement(driver, extract_dir):
             return False  # 內層失敗已印具體 STOP banner
         _write_posted_marker(extract_dir, title,
                              result["board_name"], result["selected_cats"])
+        # 同步登錄持久 CSV 清冊:即使日後此公文夾被重新下載成全新目錄(per-folder 標記
+        # 消失),清冊仍能擋下重複公告(2026-06-17 修:結案每次重下載 → 標記消失 → 重複公告)。
+        _append_to_ledger(extract_dir, _doc_no_of(extract_dir), title,
+                          result["board_name"], result["selected_cats"])
         print(f"[post_web] ✓ 公告已發佈:{title}")
         return True
     except Exception as e:

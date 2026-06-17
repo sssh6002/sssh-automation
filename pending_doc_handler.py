@@ -235,6 +235,249 @@ def _bring_to_front(hwnd):
         print(f"      [WARN] 把對話框拉前景失敗:{type(e).__name__}: {e}")
 
 
+def _minimize_explorer_windows(folder):
+    """把正顯示在 `folder`(或其子目錄)的 Windows 檔案總管視窗最小化到工作列。
+
+    公文閱覽器 / KdApp 匯出存檔後,常會自動開一個指向存檔資料夾的檔案總管視窗,
+    擋住後續自動化要操作的畫面。存檔流程跑完後呼叫本函式,只把「正落在這次存檔
+    目錄(或其下子目錄)」的檔案總管視窗縮小,不動使用者另外開著的無關資料夾視窗。
+
+    用 Shell.Application COM 逐一問每個檔案總管視窗實際所在路徑(LocationURL),
+    再用 ShowWindow(SW_MINIMIZE) 最小化命中的視窗。整段 best-effort:任何一步失敗
+    只印 WARN、絕不中斷已完成的下載/解壓/總結(對應使用者要求「處理程序完全不變」)。
+    """
+    try:
+        import win32com.client
+        from urllib.parse import unquote, urlparse
+    except Exception as e:
+        print(f"      [WARN] 無法載入 win32com,略過最小化檔案總管:{type(e).__name__}: {e}")
+        return
+
+    SW_MINIMIZE = 6
+    target = os.path.normcase(os.path.normpath(os.path.abspath(folder)))
+    minimized = 0
+    try:
+        for w in win32com.client.Dispatch("Shell.Application").Windows():
+            try:
+                url = w.LocationURL
+                hwnd = int(w.HWND)
+            except Exception:
+                continue  # 非檔案總管視窗(如 IE)或已關閉
+            if not url or not url.lower().startswith("file:"):
+                continue  # 非檔案系統視窗(控制台/特殊資料夾等)
+            path = unquote(urlparse(url).path)
+            if path.startswith("/"):
+                path = path[1:]
+            path = os.path.normcase(os.path.normpath(path.replace("/", os.sep)))
+            if path == target or path.startswith(target + os.sep):
+                _user32.ShowWindow(hwnd, SW_MINIMIZE)  # 已最小化則為 no-op,安全
+                minimized += 1
+    except Exception as e:
+        print(f"      [WARN] 最小化檔案總管視窗時出錯(不影響存檔):{type(e).__name__}: {e}")
+        return
+    if minimized:
+        print(f"      OK:已最小化 {minimized} 個顯示「{folder}」的檔案總管視窗")
+
+
+def _close_explorer_windows_in(folder):
+    """關閉「路徑落在 `folder`(或其下子目錄)」的 Windows 檔案總管視窗,釋放它對該
+    目錄持有的 handle。
+
+    為何需要:接著要刪掉這個目錄(_delete_pending_archive)。若檔案總管正開在此目錄,
+    Windows 會以 WinError 32(目錄正被另一程序使用)擋住 os.rmdir — shutil.rmtree
+    刪得掉裡面的檔,卻刪不掉目錄殼層,結果只「清空內容、資料夾還在」。最小化視窗
+    **不會**釋放此 handle,必須關閉(或把視窗導離該目錄)才行。
+
+    只關 `folder` 之內(含自身)的視窗,不動顯示上層或無關資料夾的視窗。
+    best-effort:win32com 不可用或關閉失敗都只 WARN,不影響刪除。回關閉的視窗數。
+    """
+    try:
+        import win32com.client
+        from urllib.parse import unquote, urlparse
+    except Exception as e:
+        print(f"      [WARN] 無 win32com,略過關閉檔案總管:{type(e).__name__}: {e}")
+        return 0
+
+    target = os.path.normcase(os.path.normpath(os.path.abspath(folder)))
+    closed = 0
+    try:
+        for w in list(win32com.client.Dispatch("Shell.Application").Windows()):
+            try:
+                url = w.LocationURL
+            except Exception:
+                continue
+            if not url or not url.lower().startswith("file:"):
+                continue
+            p = unquote(urlparse(url).path)
+            if p.startswith("/"):
+                p = p[1:]
+            p = os.path.normcase(os.path.normpath(p.replace("/", os.sep)))
+            if p == target or p.startswith(target + os.sep):
+                try:
+                    w.Quit()
+                    closed += 1
+                except Exception:
+                    pass
+    except Exception as e:
+        print(f"      [WARN] 關閉檔案總管視窗出錯(不影響刪除):{type(e).__name__}: {e}")
+    return closed
+
+
+def _who_locks_dir(folder):
+    """盡力找出「正握著 folder 這個目錄」的程序,回傳 ["notepad.exe(pid 23516)", ...]。
+
+    最常見的鎖法:某程序把**工作目錄(cwd)設在此資料夾** — 例如從該資料夾雙擊開啟
+    .txt/.md 的 Notepad、或在此開的終端機。這種程序即使沒開著任何檔案 handle,也會
+    讓 os.rmdir 失敗(WinError 32),且不受重跑流程影響(它是使用者的程式)。
+    Restart Manager / open_files 都查不到 cwd 鎖,要靠掃各程序的 cwd。
+
+    需要 psutil(選用);沒裝就回空 list,呼叫端會退回較籠統的提示。
+    """
+    try:
+        import psutil
+    except Exception:
+        return []
+    target = os.path.normcase(os.path.normpath(os.path.abspath(folder)))
+    holders = []
+    for pr in psutil.process_iter(["pid", "name"]):
+        try:
+            cwd = pr.cwd()
+        except Exception:
+            continue
+        if cwd and os.path.normcase(os.path.normpath(cwd)).startswith(target):
+            holders.append(f"{pr.info['name']}(pid {pr.info['pid']})")
+    return holders
+
+
+# 可自動「優雅關閉」以釋放目錄鎖的純文字檢視器白名單(都是讀公文用的看完即關)。
+# 嚴格白名單:**絕不**碰 VSCode(code.exe)、瀏覽器、IDE 等可能有重要未存內容的程式。
+_AUTO_CLOSE_HOLDER_NAMES = {"notepad.exe", "notepad++.exe", "wordpad.exe", "write.exe"}
+
+
+def _post_wm_close_to_pid(pid):
+    """對 `pid` 名下所有可見 top-level 視窗 PostMessage(WM_CLOSE),請其**優雅關閉**。
+
+    用 WM_CLOSE 而非強制 kill:若該編輯器有未存內容,它會自己跳「是否存檔」詢問,
+    使用者的資料不會被無聲丟掉(對應「存檔關掉」)。回送出的視窗數。
+    """
+    WM_CLOSE = 0x0010
+    posted = [0]
+    EnumWindowsProc = ctypes.WINFUNCTYPE(wt.BOOL, wt.HWND, wt.LPARAM)
+
+    def _cb(hwnd, _l):
+        if not _user32.IsWindowVisible(hwnd):
+            return True
+        wpid = wt.DWORD()
+        _user32.GetWindowThreadProcessId(hwnd, ctypes.byref(wpid))
+        if wpid.value == pid:
+            _user32.PostMessageW(hwnd, WM_CLOSE, 0, 0)
+            posted[0] += 1
+        return True
+
+    _user32.EnumWindows(EnumWindowsProc(_cb), 0)
+    return posted[0]
+
+
+def _close_dir_lock_holders(folder):
+    """找出把工作目錄(cwd)卡在 `folder` 的純文字檢視器(Notepad 等),請它們優雅關閉,
+    以釋放對該目錄的鎖、讓 `folder` 可被刪除。
+
+    只對 _AUTO_CLOSE_HOLDER_NAMES 白名單動手(絕不碰 VSCode/瀏覽器/IDE);用 WM_CLOSE
+    優雅關閉(有未存內容會自己跳存檔詢問,不強制 kill、不丟資料)。需要 psutil(選用);
+    沒裝就回 0。回「請求關閉的程序數」。
+    """
+    try:
+        import psutil
+    except Exception:
+        return 0
+    target = os.path.normcase(os.path.normpath(os.path.abspath(folder)))
+    asked = 0
+    for pr in psutil.process_iter(["pid", "name"]):
+        try:
+            name = (pr.info["name"] or "").lower()
+            if name not in _AUTO_CLOSE_HOLDER_NAMES:
+                continue
+            cwd = pr.cwd()
+        except Exception:
+            continue
+        if cwd and os.path.normcase(os.path.normpath(cwd)).startswith(target):
+            if _post_wm_close_to_pid(pr.info["pid"]):
+                print(f"      請 {name}(pid {pr.info['pid']}) 存檔關閉,以釋放 "
+                      f"{os.path.basename(folder)}")
+                asked += 1
+    return asked
+
+
+def _rmdir_quietly(path):
+    """os.rmdir 包一層,成功回 True、失敗回 False(不丟例外)。"""
+    try:
+        os.rmdir(path)
+        return True
+    except OSError:
+        return False
+
+
+def _remove_empty_dir(sub):
+    """刪掉空目錄 `sub`。被檔案總管/編輯器鎖住時,先關掉它們(總管視窗→WM_CLOSE 編輯器)
+    再重試;仍刪不掉就指名鎖住者並跳過。回是否成功刪除。
+    """
+    name = os.path.basename(os.path.normpath(sub))
+    _close_explorer_windows_in(sub)  # 關開在它上面的檔案總管視窗
+    if _rmdir_quietly(sub):
+        print(f"      OK:清掉空的殘留承辦中目錄 {sub}")
+        return True
+
+    # 還刪不掉:多半是某編輯器(Notepad)把 cwd 卡在此目錄 → 請它優雅關閉再重試。
+    if _close_dir_lock_holders(sub):
+        for _ in range(6):  # 等它存檔/關閉,最多 ~3s
+            time.sleep(0.5)
+            if _rmdir_quietly(sub):
+                print(f"      OK:關閉鎖住程序後已清掉 {sub}")
+                return True
+
+    holders = _who_locks_dir(sub)
+    who = ("被 " + "、".join(holders) + " 鎖住(關掉即可刪除)") if holders else \
+          "(找不到鎖住程序;可能是檔案總管快取 handle,重開機可清)"
+    print(f"      [INFO] 空殼 {name} 刪不掉(WinError 32)— {who};本次先跳過")
+    return False
+
+
+def _sweep_empty_pending_dirs(download_dir=None):
+    """掃 `download_dir`(預設 DOWNLOAD_DIR = document_download/),刪掉「空的」MW* 殘留
+    資料夾。建議在每次跑流程開頭呼叫。
+
+    這些空殼多半是先前結案存查刪除承辦中目錄時,目錄被鎖住(WinError 32)只清空了內容、
+    刪不掉殼層而留下的。鎖最常見來自:檔案總管視窗、或把工作目錄停在此的 Notepad
+    (從該資料夾雙擊開啟 .txt 的看公文視窗)。_remove_empty_dir 會先把這些關掉再刪。
+
+    安全:只刪「空」且檔名以 MW 開頭的目錄 — 空代表內容早已歸檔/刪除完畢,MW 前綴是
+    公文夾命名慣例,不會誤刪進行中或無關目錄。回實際刪掉的目錄數。整段 best-effort。
+    """
+    if download_dir is None:
+        download_dir = DOWNLOAD_DIR
+    removed = 0
+    try:
+        names = sorted(os.listdir(download_dir))
+    except OSError:
+        return 0
+    for name in names:
+        if not name.upper().startswith("MW"):
+            continue
+        sub = os.path.join(download_dir, name)
+        if not os.path.isdir(sub):
+            continue
+        try:
+            if os.listdir(sub):
+                continue  # 非空 → 進行中/尚未歸檔,絕不動
+        except OSError:
+            continue
+        if _remove_empty_dir(sub):
+            removed += 1
+    if removed:
+        print(f"[pending_doc_handler] 殘留清理:移除 {removed} 個空的 MW* 目錄")
+    return removed
+
+
 def _handle_export_dialog(download_dir, timeout=30):
     """等「匯出公文資料」對話框出現、把路徑填進去、按 Enter 確認。
 
@@ -894,6 +1137,11 @@ def _download_and_extract(driver, download_dir=None, summarize=True):
             except Exception as e:
                 print(f"      [WARN] summarize_doc 呼叫失敗 (不影響下載流程):"
                       f"{type(e).__name__}: {e}")
+
+    # 存檔完成 — 把匯出後自動開啟、擋住畫面的檔案總管視窗最小化(承辦中 →
+    # document_download/、結案存查 → document_download_closure/ 兩條流程都走這裡)。
+    # best-effort:不影響上面已完成的下載/解壓/總結。
+    _minimize_explorer_windows(download_dir)
 
     return True, extract_dir
 

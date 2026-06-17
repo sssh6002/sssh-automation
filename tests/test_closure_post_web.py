@@ -224,6 +224,91 @@ def test_maybe_post_skips_when_already_posted(tmp_path, monkeypatch):
     assert called["login"] is False
 
 
+def test_already_posted_matches_any_marker_glob(tmp_path):
+    # 使用者規則:夾內任何 *已公告.txt(即使檔名對不上主檔名)即視為已公告。
+    d, base = _make_doc_dir(tmp_path)  # 主檔名 base=12345_678
+    assert pw._already_posted(str(d)) is False
+    (d / "公文已公告.txt").write_text("手動標記免公告", encoding="utf-8")  # 名稱≠主檔名
+    assert pw._already_posted(str(d)) is True
+
+
+def test_already_posted_false_on_missing_dir(tmp_path):
+    assert pw._already_posted(str(tmp_path / "不存在")) is False
+
+
+def test_maybe_post_skips_when_marker_name_differs(tmp_path, monkeypatch):
+    # 觸發公告但夾內已有不同檔名的 *已公告.txt → 仍應跳過、不登入發佈。
+    d, _ = _doc_dir_with_summary(tmp_path, NEW_FORMAT)
+    (d / "前次已公告.txt").write_text("x", encoding="utf-8")
+    called = {"login": False}
+    monkeypatch.setattr(pw, "_open_and_login_sssh",
+                        lambda drv: called.__setitem__("login", True) or True)
+    assert pw.maybe_post_announcement(object(), str(d)) is True
+    assert called["login"] is False
+
+
+def test_ledger_csv_append_and_read_roundtrip(tmp_path):
+    import csv as _csv
+    d, _ = _make_doc_dir(tmp_path)  # tmp_path/MWAA_x;清冊在上層 tmp_path
+    assert pw._ledger_doc_nos(str(d)) == set()
+    pw._append_to_ledger(str(d), "MWAA999", "標題,含逗號與「引號」", "圖書館公告", ["課外活動", "硏習資訊"])
+    assert "MWAA999" in pw._ledger_doc_nos(str(d))
+    ledger = tmp_path / "_已公告清單.csv"
+    assert ledger.is_file()
+    # 用 csv 正確解析:表頭 + 1 列資料;公文檔號在第 1 欄、含逗號的主旨完整保留
+    with open(ledger, encoding="utf-8-sig", newline="") as f:
+        rows = list(_csv.reader(f))
+    assert rows[0] == ["公文檔號", "時間", "主旨", "公告於", "同步顯示於"]
+    assert rows[1][0] == "MWAA999"
+    assert rows[1][2] == "標題,含逗號與「引號」"
+    assert rows[1][3] == "圖書館公告"
+    assert rows[1][4] == "課外活動+硏習資訊"
+
+
+def test_backfill_ledger_parses_marker_content(tmp_path):
+    # 補登時解析 *已公告.txt 三行格式,把主旨/公告於/同步顯示於一併寫入 CSV。
+    a = tmp_path / "MWAA_A"; a.mkdir()
+    (a / "x已公告.txt").write_text(
+        "2026-06-13T13:26:33_已公告。\n主旨:測試主旨\n公告於:圖書館公告。同步顯示於:課外活動+硏習資訊。",
+        encoding="utf-8")
+    (tmp_path / "MWAA_B").mkdir()  # 無標記
+    pw._backfill_ledger_from_markers(str(a))
+    nos = pw._ledger_doc_nos(str(a))
+    assert "MWAA_A" in nos and "MWAA_B" not in nos
+    import csv as _csv
+    with open(tmp_path / "_已公告清單.csv", encoding="utf-8-sig", newline="") as f:
+        rows = [r for r in _csv.reader(f) if r and r[0] == "MWAA_A"]
+    assert len(rows) == 1  # 冪等前提:一筆
+    assert rows[0] == ["MWAA_A", "2026-06-13T13:26:33", "測試主旨", "圖書館公告", "課外活動+硏習資訊"]
+    pw._backfill_ledger_from_markers(str(a))  # 再跑不重複
+    with open(tmp_path / "_已公告清單.csv", encoding="utf-8-sig", newline="") as f:
+        again = [r for r in _csv.reader(f) if r and r[0] == "MWAA_A"]
+    assert len(again) == 1
+
+
+def test_maybe_post_skips_when_in_ledger_without_marker(tmp_path, monkeypatch):
+    # 核心情境:之前已公告(登錄清冊),這次公文夾是重新下載的全新目錄、無 *已公告.txt。
+    d, _ = _doc_dir_with_summary(tmp_path, NEW_FORMAT)
+    pw._append_to_ledger(str(d), pw._doc_no_of(str(d)), "前次已公告", "圖書館公告", ["課外活動"])
+    called = {"login": False}
+    monkeypatch.setattr(pw, "_open_and_login_sssh",
+                        lambda drv: called.__setitem__("login", True) or True)
+    assert pw.maybe_post_announcement(object(), str(d)) is True
+    assert called["login"] is False  # 清冊命中 → 不重複公告
+
+
+def test_maybe_post_appends_ledger_on_success(tmp_path, monkeypatch):
+    import taipeion_login_selenium
+    d, _ = _doc_dir_with_summary(tmp_path, NEW_FORMAT)
+    monkeypatch.setattr(taipeion_login_selenium, "_read_config",
+                        lambda key: "系管師群組" if key == "sssh_publish_unit" else None)
+    monkeypatch.setattr(pw, "_open_and_login_sssh", lambda drv: True)
+    monkeypatch.setattr(pw, "_submit_announcement",
+                        lambda drv, t, b, *a: {"selected_cats": ["課外活動"], "board_name": "圖書館公告"})
+    assert pw.maybe_post_announcement(object(), str(d)) is True
+    assert pw._doc_no_of(str(d)) in pw._ledger_doc_nos(str(d))  # 成功後已登錄清冊
+
+
 def test_maybe_post_returns_false_and_no_marker_when_submit_fails(tmp_path, monkeypatch):
     d, base = _doc_dir_with_summary(tmp_path, NEW_FORMAT)
     monkeypatch.setattr(pw, "_open_and_login_sssh", lambda drv: True)
