@@ -343,6 +343,32 @@ def _stop_banner(reason, hint=""):
     print("!" * 60 + "\n")
 
 
+def _force_field_value(driver, el_id, value, attempts=3, settle=0.3):
+    """確保 #el_id 欄位的最終值 == value；被 Chrome 密碼自動填入蓋掉時用 JS 改回。
+
+    根因（2026-07-14 實機重現）：Selenium profile 存有校網登入頁的帳密時，Chrome
+    在欄位 focus 才觸發自動填入 — 晚於腳本的 clear()，造成腳本填的帳號配上
+    autofill 填的另一組密碼「混合送出」→ 登入失敗 → 公告失敗。
+    瀏覽器層已另關閉密碼管理員（taipeion_login_selenium）；此函式是送出前的
+    最後一道防線，值不對就以 JS 改寫並補發 input/change 事件（讓前端框架看到）。
+    回 True=最終值正確；False=改了 attempts 次仍不對。絕不印出 value（可能是密碼）。
+    """
+    read_js = ("var el = document.getElementById(arguments[0]);"
+               "return el ? el.value : null;")
+    write_js = ("var el = document.getElementById(arguments[0]);"
+                "if (!el) return;"
+                "el.value = arguments[1];"
+                "el.dispatchEvent(new Event('input', {bubbles: true}));"
+                "el.dispatchEvent(new Event('change', {bubbles: true}));")
+    for _ in range(attempts):
+        if driver.execute_script(read_js, el_id) == value:
+            return True
+        print(f"      [WARN] #{el_id} 欄位值與預期不符(疑被自動填入蓋掉),用 JS 強制改回")
+        driver.execute_script(write_js, el_id, value)
+        time.sleep(settle)
+    return driver.execute_script(read_js, el_id) == value
+
+
 def _close_school_tab(driver):
     """關掉目前(校網)分頁、切回剩下的第一個分頁(edoc 主分頁)。"""
     try:
@@ -402,6 +428,14 @@ def _open_and_login_sssh(driver):
 
     u = driver.find_element(By.ID, "login-user-name"); u.clear(); u.send_keys(acc)
     p = driver.find_element(By.ID, "login-password"); p.clear(); p.send_keys(pw_)
+    # 送出前驗證兩欄的「最終值」：Chrome 自動填入在欄位 focus 才觸發（晚於上面的
+    # clear），會把已存的另一組帳密蓋進來 → 混合帳密登入失敗（見 _force_field_value）。
+    if not (_force_field_value(driver, "login-user-name", acc)
+            and _force_field_value(driver, "login-password", pw_)):
+        _stop_banner("帳密欄位值一直被改寫(自動填入干擾),不送出登入",
+                     "檢查 Selenium profile 是否又存了密碼(應已被啟動時自動清除)")
+        _close_school_tab(driver)
+        return False
     btn = driver.find_element(By.CSS_SELECTOR, "button.btn-primary[type=submit]")
     driver.execute_script("arguments[0].click();", btn)  # 直接 click 被覆蓋層攔截,用 JS click
     time.sleep(3)

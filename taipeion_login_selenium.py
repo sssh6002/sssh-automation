@@ -107,6 +107,31 @@ def _mark_profile_clean_exit():
                 pass
 
 
+def _purge_saved_passwords():
+    """刪除 Selenium profile 內的已存密碼資料庫（2026-07-14 公告失敗根因的斷根步驟）。
+
+    此 profile 曾被登入 Google 帳號，同步下使用者個人密碼庫（Login Data For
+    Account 數百筆，含校網 passport 登入頁與 login.gov.taipei）。Chrome 在登入頁
+    欄位 focus 時把已存帳密蓋進欄位，和腳本的 send_keys 打架 → 公告失敗。
+    自動化所需帳密全部來自 env.env，此 profile 不需要也不該存任何密碼。
+    _build_chrome_options 的 prefs 已關閉密碼管理員（第一層）；本函式在 Chrome
+    啟動前把既存資料庫實體刪除（第二層），即使日後有人在此 profile 手動存密碼
+    或重新同步，下次啟動也會被清掉。檔案被鎖時印 WARN、不中斷流程。"""
+    profile_path = os.path.join(USER_DATA_DIR, PROFILE_DIR)
+    removed = 0
+    for filename in ("Login Data", "Login Data-journal",
+                     "Login Data For Account", "Login Data For Account-journal"):
+        p = os.path.join(profile_path, filename)
+        if os.path.isfile(p):
+            try:
+                os.remove(p)
+                removed += 1
+            except OSError as e:
+                print(f"      [WARN] 刪除已存密碼檔 {filename} 失敗：{type(e).__name__}: {e}")
+    if removed:
+        print(f"      OK：已清除 profile 內已存密碼資料庫（{removed} 檔）")
+
+
 def _reset_crash_streak():
     """重置 Local State 的 variations_crash_streak。Chrome 累積 5+ 次 crash 後會安全模式
     拒絕啟動，每次 Stop-Process 強制殺 Chrome 都會讓這個值 +1。"""
@@ -395,6 +420,15 @@ def _build_chrome_options():
     # CDP grant (_grant_clipboard_permission) 是 PermissionContext 層的雙保險。
     options.add_experimental_option("prefs", {
         "profile.default_content_setting_values.clipboard": 1,
+        # 關閉 Chrome 密碼管理員（2026-07-14 公告失敗根因）：此 profile 曾登入
+        # Google 帳號、同步下數百筆已存密碼（含校網 passport 登入頁的 robot/
+        # sysman）。登入頁欄位 focus 時 autofill 把已存帳密蓋進欄位（實測晚於
+        # 腳本的 clear()），與 send_keys 打架 → 送出混合帳密 → 登入失敗。
+        # 自動化所需帳密一律由 env.env 供給，瀏覽器層全部關閉。
+        "credentials_enable_service": False,        # 不再跳「要儲存密碼嗎?」
+        "credentials_enable_autosignin": False,     # 關 Credential Management 自動登入
+        "profile.password_manager_enabled": False,  # 關密碼管理員（含自動填入）
+        "profile.password_manager_leak_detection": False,  # 關「密碼外洩」對話框
     })
     # 自動接受所有 JS dialog（alert/confirm/prompt）— 公文系統點方塊可能跳 JS confirm，
     # 沒處理會讓 Selenium 永遠卡在 unhandled prompt 狀態，後續 driver.xxx 全部 hang。
@@ -704,6 +738,7 @@ def login_taipeion_selenium(return_driver=False):
     _reset_crash_streak()
     if os.path.isdir(os.path.join(USER_DATA_DIR, PROFILE_DIR)):
         _mark_profile_clean_exit()
+        _purge_saved_passwords()
 
     options = _build_chrome_options()
 
