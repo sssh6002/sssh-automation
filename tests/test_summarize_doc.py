@@ -255,6 +255,56 @@ def test_antigravity_returns_none_when_pty_fails(monkeypatch):
     assert sd._llm_summarize_antigravity("prompt") == (None, None)
 
 
+# ───────────────────────── claude backend 參數 ─────────────────────────
+
+class _FakeCompleted:
+    def __init__(self, stdout):
+        self.returncode = 0
+        self.stdout = stdout
+        self.stderr = ""
+
+
+_CLAUDE_OK_JSON = ('{"result": "摘要內容", '
+                   '"modelUsage": {"claude-sonnet-5": {"inputTokens": 1}}}')
+
+
+def _run_claude_capturing_cmd(monkeypatch, config):
+    """跑 _llm_summarize_claude_code,攔下 subprocess cmd。config=dict 注入 _read_config。"""
+    monkeypatch.setattr(sd.shutil, "which", lambda name: r"C:\fake\claude.exe")
+    monkeypatch.setattr(sd, "_read_config", lambda key: config.get(key))
+    seen = {}
+
+    def fake_run(cmd, **kwargs):
+        seen["cmd"] = cmd
+        return _FakeCompleted(_CLAUDE_OK_JSON)
+
+    monkeypatch.setattr(sd.subprocess, "run", fake_run)
+    text, model = sd._llm_summarize_claude_code("prompt")
+    assert (text, model) == ("摘要內容", "claude-sonnet-5")
+    return seen["cmd"]
+
+
+def test_claude_default_cmd_has_no_model_or_effort(monkeypatch):
+    cmd = _run_claude_capturing_cmd(monkeypatch, {})
+    assert "--model" not in cmd
+    assert "--effort" not in cmd
+
+
+def test_claude_passes_model_flag_when_configured(monkeypatch):
+    cmd = _run_claude_capturing_cmd(monkeypatch, {"summarize_claude_model": "sonnet"})
+    i = cmd.index("--model")
+    assert cmd[i + 1] == "sonnet"
+    assert "--effort" not in cmd
+
+
+def test_claude_passes_effort_flag_when_configured(monkeypatch):
+    cmd = _run_claude_capturing_cmd(
+        monkeypatch,
+        {"summarize_claude_model": "sonnet", "summarize_claude_effort": "medium"})
+    assert cmd[cmd.index("--model") + 1] == "sonnet"
+    assert cmd[cmd.index("--effort") + 1] == "medium"
+
+
 # ───────────────────────── _find_agy 定位 ─────────────────────────
 
 def test_find_agy_uses_path_when_available(monkeypatch):

@@ -433,6 +433,13 @@ def _llm_summarize_claude_code(prompt_text):
     """走 Claude Code CLI (`claude -p`) — 用使用者既有的 claude.ai 訂閱 OAuth
     認證,不需 API key、不裝套件。
 
+    模型/effort 可用 env.env 控制(比照 agy/aistudio 的 model 參數設計):
+      - summarize_claude_model  → `--model`(alias 如 sonnet/opus/fable 或完整 ID);
+        留空 = Claude Code 的全域預設模型。不釘住的風險:使用者用 /model 改預設
+        (如改成 Fable 5)後,公文總結會默默跟著改用最重的模型(2026-07-14 實測)。
+      - summarize_claude_effort → `--effort`(low/medium/high/xhigh/max);
+        留空 = 全域預設。總結是萃取+格式化任務,不需要深推理。
+
     --output-format json 讓 CLI 回傳結構化 JSON,可從 modelUsage 取得「實際被呼叫
     的模型 ID」(會反映目前訂閱對應的最新模型,如 claude-opus-4-7[1m] 等)。
 
@@ -444,10 +451,17 @@ def _llm_summarize_claude_code(prompt_text):
     claude_exe = shutil.which("claude")
     if not claude_exe:
         return None, None
+    cmd = [claude_exe, "-p", "--output-format", "json"]
+    model_cfg = _read_config("summarize_claude_model")
+    if model_cfg:
+        cmd += ["--model", model_cfg]
+    effort_cfg = _read_config("summarize_claude_effort")
+    if effort_cfg:
+        cmd += ["--effort", effort_cfg]
     with tempfile.TemporaryDirectory(prefix="claude_summary_") as td:
         try:
             result = subprocess.run(
-                [claude_exe, "-p", "--output-format", "json"],
+                cmd,
                 input=prompt_text,
                 capture_output=True,
                 text=True,
