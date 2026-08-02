@@ -96,9 +96,18 @@ _SUMMARIZE_MAX_ATTEMPTS = 3
 # 設定讀取 / backend 順序 / 金鑰解析 / 終端機跳脫碼清理
 # ─────────────────────────────────────────────────────────────────────────────
 
+# 呼叫端可暫時覆寫設定值,不必動 env.env。目前用途:announce_doc.py 讓「公告文案」
+# 走比較好的模型,而「公文摘要」維持便宜的預設 —— 兩者共用同一條 backend cascade,
+# 沒有這個機制就只能一起變貴。key 同 env.env 的欄位名。
+_CONFIG_OVERRIDE = {}
+
+
 def _read_config(key):
     """從 env.env 讀 key=value (# 開頭整行為註解、空行略過)。
+    _CONFIG_OVERRIDE 內有同名 key 時優先採用(呼叫端暫時覆寫)。
     找不到 / 值為空 / 讀檔失敗都回 None。"""
+    if key in _CONFIG_OVERRIDE:
+        return _CONFIG_OVERRIDE[key] or None
     if not ENV_FILE.is_file():
         return None
     try:
@@ -373,6 +382,16 @@ def _llm_summarize_antigravity(prompt_text):
     if not text:
         print("      [ERROR] agy 回應為空(ConPTY 取不到輸出)")
         return None, None
+    # agy CLI 遇帳號/額度問題時會把錯誤訊息印到 stdout(而非非零 exit code 讓
+    # _run_agy_pty 判斷),例如「Error: Eligibility check failed: ...」。這種
+    # 輸出不是總結內容,若直接當成功回傳,_call_backends 會把它當「antigravity
+    # 已產出回應」而不換下一棒,summarize_doc 的格式解析重試也永遠撞同一顆壞掉
+    # 的 backend(2026-07-24 事故:連續 3 次都是同一句 Eligibility 錯誤,從未
+    # 真正試到 aistudio/claude/anthropic)。故把明顯的錯誤訊息視為失敗,讓位給
+    # 下一棒。
+    if text.startswith("Error:") or text.startswith("Error "):
+        print(f"      [ERROR] agy 回應為錯誤訊息(非總結內容),換下一棒:{text[:150]!r}")
+        return None, None
     return text, (model_cfg or AGY_DEFAULT_MODEL_LABEL)
 
 
@@ -427,6 +446,26 @@ def _llm_summarize_aistudio(prompt_text):
         print(f"      [ERROR] aistudio 回應無文字;finishReason={cand.get('finishReason')}")
         return None, None
     return text, (data.get("modelVersion") or model)
+
+
+def _dominant_model(model_usage):
+    """從 claude -p 的 modelUsage 挑出「真正幹活」的模型 id。
+
+    prompt 一長,Claude Code 會另外叫小模型跑內部雜事,modelUsage 於是有多個 key,
+    且順序不保證主模型在前。舊版取 next(iter(...)) 會報成那顆跑雜事的 haiku ——
+    看起來像 --model 沒生效,實際上有(2026-07-28 查出)。改取 token 用量最大者。
+    """
+    if not model_usage:
+        return None
+
+    def total(v):
+        if not isinstance(v, dict):
+            return 0
+        return sum(v.get(k, 0) or 0 for k in
+                   ("inputTokens", "outputTokens",
+                    "cacheReadInputTokens", "cacheCreationInputTokens"))
+
+    return max(model_usage, key=lambda k: total(model_usage[k]))
 
 
 def _llm_summarize_claude_code(prompt_text):
@@ -487,7 +526,7 @@ def _llm_summarize_claude_code(prompt_text):
         return None, None
     response_text = (data.get("result") or "").strip()
     model_usage = data.get("modelUsage") or {}
-    model_id = next(iter(model_usage), None) if model_usage else None
+    model_id = _dominant_model(model_usage)
     if not response_text or not model_id:
         print(f"      [ERROR] claude -p JSON 缺 result 或 modelUsage;keys={list(data.keys())}")
         return None, None
@@ -609,22 +648,47 @@ def summarize_doc(doc_dir):
         return None
     spec_md_text = _strip_html_comments(spec_md_text)
 
-    inventory = sorted(p.name for p in doc_dir.iterdir() if p.is_file())
+    # 主檔 PDF 通常攤平在目錄第一層;但手動解壓 / 舊流程留下的目錄會把檔案留在
+    # 「來文」之類的子資料夾裡。第一層找不到就往下找一層,免得整個目錄永遠備不了料
+    # (2026-07-28:實測 9 個目錄卡在這,同步到審核表時看起來像「新公文都進不來」)。
+    files = [p for p in doc_dir.iterdir() if p.is_file()]
+    if not any(_MAIN_DOC_PATTERN.match(p.name) for p in files):
+        for sub in sorted(p for p in doc_dir.iterdir() if p.is_dir()):
+            deeper = [p for p in sub.iterdir() if p.is_file()]
+            if any(_MAIN_DOC_PATTERN.match(p.name) for p in deeper):
+                print(f"      第一層沒有主檔 PDF,改用子目錄「{sub.name}」")
+                files = deeper
+                break
+
+    inventory = sorted(p.name for p in files)
     if not inventory:
         print(f"[ERROR] {doc_dir.name}:目錄為空")
         return None
+    by_name = {p.name: p for p in files}
 
     pdf_texts = {}
     for name in inventory:
         if not _MAIN_DOC_PATTERN.match(name):
             continue
-        raw = _pdf_to_text(doc_dir / name)
+        raw = _pdf_to_text(by_name[name])
         if raw.strip():
             pdf_texts[name] = _clean_pdf_text(raw)
     if not pdf_texts:
         print(f"[ERROR] {doc_dir.name}:找不到主檔 PDF(數字_數字[A-Z]?.pdf)")
         return None
     print(f"      抽到 {len(pdf_texts)} 份 PDF 文字:{list(pdf_texts.keys())}")
+
+    # ── 個資把關:公文全文會送到外部 AI,含個資者一律不送 ───────────────────
+    from content_guard import pii_report, scan_pii
+    findings = scan_pii("\n".join(pdf_texts.values()), inventory)
+    if findings:
+        report = pii_report(findings)
+        marker = doc_dir / f"{sorted(pdf_texts)[0].rsplit('.', 1)[0]}含個資.txt"
+        marker.write_text(report, encoding="utf-8")
+        print(f"      [擋下] 偵測到個資,未送 AI → {marker.name}")
+        for label, hit, _ in findings:
+            print(f"          {label}:{hit}")
+        return None
 
     prompt = _build_prompt(spec_md_text, inventory, pdf_texts)
 

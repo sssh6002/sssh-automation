@@ -355,3 +355,31 @@ def test_call_backends_all_fail_returns_none_triple(monkeypatch):
     monkeypatch.setattr(sd, "_llm_summarize_antigravity", lambda p: (None, None))
     monkeypatch.setattr(sd, "_llm_summarize_anthropic", lambda p: (None, None))
     assert sd._call_backends("prompt") == (None, None, None)
+
+
+# ── modelUsage 主模型判定（2026-07-28）────────────────────────────────────
+
+def test_dominant_model_picks_the_heaviest_user():
+    """prompt 一長,Claude Code 會另叫小模型跑雜事;不能取第一個 key。"""
+    from summarize_doc import _dominant_model
+    usage = {
+        "claude-haiku-4-5-20251001": {"inputTokens": 12, "outputTokens": 3},
+        "claude-sonnet-4-6": {"inputTokens": 9000, "outputTokens": 700},
+    }
+    assert _dominant_model(usage) == "claude-sonnet-4-6"
+
+
+def test_dominant_model_counts_cache_tokens():
+    from summarize_doc import _dominant_model
+    usage = {
+        "small": {"inputTokens": 50, "outputTokens": 50},
+        "big": {"inputTokens": 1, "outputTokens": 1, "cacheReadInputTokens": 9000},
+    }
+    assert _dominant_model(usage) == "big"
+
+
+def test_dominant_model_handles_empty_and_odd_shapes():
+    from summarize_doc import _dominant_model
+    assert _dominant_model({}) is None
+    assert _dominant_model(None) is None
+    assert _dominant_model({"only": None}) == "only"
