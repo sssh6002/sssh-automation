@@ -26,8 +26,12 @@ from datetime import datetime
 HOME_URL = "https://www.sssh.tp.edu.tw/nss/p/index"
 ANNO_URL = "https://www.sssh.tp.edu.tw/nss/s/main/p/library"
 
-# 觸發關鍵字：總結「承辦文字」(## 行) 含此字串才發佈到校網。
-ANNOUNCE_KEYWORD = "於官網公告"
+# 觸發關鍵字：總結「承辦文字」(## 行) 含其中任一字串才發佈到校網。
+# 2026-07-28 起 summarize_doc.md 改用承辦人慣用句「一、於學校公告欄公佈周知。
+# 二、文存備查。」，不再含舊的「於官網公告」— 只留舊關鍵字會掃出零筆。
+# 兩種都留著，舊總結檔(未重跑者)仍然認得。
+ANNOUNCE_KEYWORDS = ("公佈周知", "於官網公告", "於校網公告")
+ANNOUNCE_KEYWORD = ANNOUNCE_KEYWORDS[0]   # 向後相容:舊 import 不致 ImportError
 
 # 主旨行：兼容有無 * 前綴、半/全形冒號、冒號前後空白。
 _SUBJECT_RE = re.compile(r'^\*?\s*主旨\s*[:：]\s*(.+)$')
@@ -108,31 +112,129 @@ def _parse_summary(extract_dir):
 
 
 def _should_post(summary):
-    """承辦文字是否含「於官網公告」→ 該不該發佈到校網。summary 為 None / handling
-    為 None / 不含關鍵字 → False。"""
+    """承辦文字含 ANNOUNCE_KEYWORDS 任一 → 該發佈到校網。
+
+    反面案例(都不含關鍵字,自然為 False):
+      「一、本校目前無參加計畫。二、文存備查。」   → 不公告
+      「一、轉知生活科技教師。二、文存備查。」     → 只轉知科別,不上校網
+      「（請自行填寫：本案為回覆本校申請）」       → 還沒決定,不公告
+    """
     if not summary:
         return False
     handling = summary.get("handling")
-    return bool(handling) and ANNOUNCE_KEYWORD in handling
+    return bool(handling) and any(k in handling for k in ANNOUNCE_KEYWORDS)
 
 
-def _body_to_html(body):
-    """把條列摘要(每行一條)轉成 CKEditor 可吃的 HTML 段落,逐行一個 <p>。
+# 版型開關:True = 松高風格表格卡片(sssh_style),False = 舊版逐行 <p>。
+# 若站上 CKEditor 會把 inline style / <section> 濾掉,把這個關掉就回舊行為。
+USE_SSSH_STYLE = True
 
-    跳過空行;對每行做 HTML escape,避免內容含 < & 破版。
+
+def _body_to_html(body, title=None):
+    """把條列摘要轉成 CKEditor 可吃的 HTML。
+
+    預設走「松高風格表格卡片」(見 sssh_style.py)。標題不重複輸出 — 校網布告欄
+    本身有標題列。轉檔失敗一律退回舊版逐行 <p>,不讓版型問題擋掉公告。
     """
+    if USE_SSSH_STYLE:
+        try:
+            from document_closure.sssh_style import render_fragment
+            return render_fragment(title or "", body, include_title=False)
+        except Exception as e:
+            print(f"[post_web] 松高風格轉檔失敗,退回純段落:{type(e).__name__}: {e}")
     lines = [ln for ln in body.split("\n") if ln.strip()]
     return "".join(f"<p>{html.escape(ln)}</p>" for ln in lines)
 
 
-def _find_attachments(extract_dir):
-    """回 extract_dir 內所有檔名含 ATTCH 的檔案絕對路徑(公文附件 *ATTCH*),排序後回傳。"""
+# 可以當附件上傳的副檔名。其餘(txt/md/bak…)都是本專案自己的產物,不上傳。
+_ATTACH_EXTS = {".pdf", ".png", ".jpg", ".jpeg", ".gif", ".bmp", ".webp",
+                ".doc", ".docx", ".xls", ".xlsx", ".ppt", ".pptx", ".odt", ".zip"}
+# 來文主檔:數字_數字[A-Z].pdf — 是公文本體,不是附件。
+_MAIN_DOC_FILE_RE = re.compile(r"^\d+_\d+[A-Za-z]?\.pdf$")
+# 簽核意見單與合併版:內部文件,不對外公告。
+_NOT_ATTACH_RE = re.compile(r"(opinion|合併版)", re.I)
+
+
+def _is_attachment(name):
+    if os.path.splitext(name)[1].lower() not in _ATTACH_EXTS:
+        return False
+    if _MAIN_DOC_FILE_RE.match(name) or _NOT_ATTACH_RE.search(name):
+        return False
+    return True
+
+
+ATTACH_CHOICE_FILE = "附件選擇.json"
+
+
+def _read_attach_choice(extract_dir):
+    """讀 ui.py 寫下的逐檔勾選結果（檔名 set）。沒有就回 None = 用自動判斷。"""
+    p = os.path.join(extract_dir, ATTACH_CHOICE_FILE)
+    if not os.path.isfile(p):
+        return None
     try:
-        names = os.listdir(extract_dir)
+        import json
+        with open(p, encoding="utf-8") as f:
+            v = json.load(f)
+        return set(v) if isinstance(v, list) else None
+    except Exception:
+        return None
+
+
+def _digest(path):
+    import hashlib
+    h = hashlib.md5()
+    try:
+        with open(path, "rb") as f:
+            for chunk in iter(lambda: f.read(1 << 16), b""):
+                h.update(chunk)
     except OSError:
-        return []
-    return [os.path.abspath(os.path.join(extract_dir, n))
-            for n in sorted(names) if "attch" in n.lower()]
+        return path          # 讀不到就用路徑當 key,至少不會誤併
+    return h.hexdigest()
+
+
+def _find_attachments(extract_dir):
+    """回要上傳到校網的附件絕對路徑(排序後)。
+
+    以前只抓檔名含 ATTCH 的原始檔。但承辦人習慣把附件改成看得懂的名字
+    (「研習議程.pdf」),那些名字不含 ATTCH,舊版抓不到 —— 而附件名稱是讀者
+    看得到的東西,「43742677_..._ATTACH1.png」對家長毫無意義。
+
+    現在:遞迴收集所有像附件的檔,再**依內容雜湊去重**,同一份內容有多個檔名時
+    挑「不含 ATTCH 的那個」(即承辦人改過名的)。沒改名的附件照樣上傳,不會漏。
+    """
+    # 承辦人在介面上逐檔勾選過 → 完全以他的選擇為準（連「不像附件」的檔也能傳）。
+    # 「是附件」不等於「要上傳」:一份公文常附三四個檔,實際要放上校網的可能只有
+    # 一兩個。沒有勾選檔時走下面的自動判斷,行為與過去相同。
+    chosen = _read_attach_choice(extract_dir)
+    if chosen is not None:
+        picked = []
+        for dirpath, _, filenames in os.walk(extract_dir):
+            for n in filenames:
+                if n in chosen:
+                    picked.append(os.path.abspath(os.path.join(dirpath, n)))
+        return sorted(picked)
+
+    cands = []
+    for dirpath, _, filenames in os.walk(extract_dir):
+        for n in filenames:
+            if _is_attachment(n):
+                cands.append(os.path.abspath(os.path.join(dirpath, n)))
+
+    best = {}
+    for p in sorted(cands):
+        key = _digest(p)
+        cur = best.get(key)
+        if cur is None:
+            best[key] = p
+            continue
+        # 同內容:偏好沒有 ATTCH 的檔名(人工改過的);都一樣則取較短的
+        cur_raw = "attch" in os.path.basename(cur).lower()
+        new_raw = "attch" in os.path.basename(p).lower()
+        if cur_raw and not new_raw:
+            best[key] = p
+        elif cur_raw == new_raw and len(os.path.basename(p)) < len(os.path.basename(cur)):
+            best[key] = p
+    return sorted(best.values())
 
 
 def _posted_marker_path(extract_dir):
@@ -619,7 +721,7 @@ def _submit_announcement(driver, title, body, attachments=None,
             if (!root) return 'none';
             if (root.ckeditorInstance) { root.ckeditorInstance.setData(arguments[0]); return 'api'; }
             root.focus(); root.innerHTML = arguments[0]; return 'innerHTML';
-        """, _body_to_html(body))
+        """, _body_to_html(body, title))
         if set_mode == 'none':
             _stop_banner("找不到 CKEditor 內容區(.ck-content)")
             return False
@@ -749,11 +851,15 @@ def _submit_announcement(driver, title, body, attachments=None,
 def maybe_post_announcement(driver, extract_dir):
     """結案存查歸檔後的發佈入口(掛在 document_closure 歸檔成功之後)。
 
-    - 觸發判定不符(總結承辦文字不含「於官網公告」)→ 回 False(skipped,非錯誤)
+    - 觸發判定不符(總結承辦文字不含公告關鍵字)→ 回 False(skipped,非錯誤)
     - 已有「已公告」標記 → 回 True(skip)
     - env.env 缺 sssh_publish_unit / 登入 / 發佈失敗 → 印 STOP banner 回 False
       (不 raise,絕不影響已完成的存查歸檔)
     - 成功 → 寫已公告標記(三行格式,含板名 + 實際選到的分類)、回 True
+
+    ⚠️ 這條路徑**沒有人工確認**:跑 py main.py 3 結案時會順便把符合條件的公文
+    貼上校網。2026-07-28 曾因此把一份他人業務的內部公文送上校網。
+    此為原作者設計，本 fork 不更動；批次流程另走 post_web_review 的逐筆確認。
     """
     from taipeion_login_selenium import _read_config
     try:

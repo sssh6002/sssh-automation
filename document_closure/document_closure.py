@@ -45,6 +45,11 @@ CLOSURE_DOWNLOAD_DIR = os.path.normpath(os.path.join(_PROJECT_ROOT, "document_do
 # 才執行下載+結案存查動作。其他狀態(如還在簽核、意見有異)保守不動作。
 _APPROVAL_KEYWORD = "如擬"
 
+# 待結案清單頂端連續幾輪都是同一份文件、且都還沒核決「如擬」,就提早停下迴圈,
+# 不空轉等到 max_iterations(2026-07-27 事故:同一份卡住的公文空轉近 30 輪、
+# 快 5 分鐘才停,看起來像程式卡住)。
+_NO_APPROVAL_STREAK_LIMIT = 2
+
 
 def _copy_meta_files_from_pending(closure_dir):
     """從 document_download/<同公文文號>/ 找 *總結*.md + *內容.txt 複製到 closure_dir。
@@ -920,7 +925,12 @@ def _handle_pincode_popup(driver, popup_timeout=15, close_timeout=20):
             print("      OK:切回主 window")
     except Exception as e:
         print(f"      [WARN] 切回主 window 失敗:{type(e).__name__}: {e}")
-    return True
+    # popup 沒關閉代表簽章狀態不確定(可能還在跑、也可能卡住) — 回 False 讓呼叫端
+    # 知道這輪「確定存檔」的簽章結果未經確認,不能悄悄當作已完成。
+    # 2026-07-16 事故:這裡曾不論 popup_closed 都回 True,導致 document_closure
+    # 的清單消失檢查(本身也不可靠)誤判存查成功,下一輪又對同一份公文重複送簽章,
+    # 直到伺服器擋下(Error Code:6005 使用者重複送歸檔簽章時間過近)才曝光。
+    return popup_closed
 
 
 # 找 doc_no 在可見 <tr>(待結案清單的列)的 JS — 比通用 _FIND_KEYWORD_JS 更精確:
@@ -1292,6 +1302,56 @@ def _has_approval_text(driver, keyword=_APPROVAL_KEYWORD, timeout=10):
     return _search_keyword_in_all_frames(driver, keyword, timeout)
 
 
+# 代理人「決行」但沒寫意見文字時,核決區只會留下「115/07/27 08:20:50 決行」這種
+# 時間戳記,沒有任何「如擬」之類的自由文字(2026-07-27 事故:MWAA1156007442 的
+# 決行人是代理人,沒寫意見,_has_approval_text 找不到「如擬」→ 程式誤判成「還沒
+# 核決」，其實已經核准原提案。使用者確認:代理人決行不寫意見 = 等同如擬直接
+# 核准原提案)。用「日期 時間 決行」的時間戳記樣式比對真的發生過的決行動作,
+# 不是畫面上的靜態流程標籤(如清單頁「陳核決行(待結案)」那種狀態文字)。
+_DECIDED_TIMESTAMP_RE = re.compile(r'\d{2,3}/\d{1,2}/\d{1,2}\s+\d{1,2}:\d{2}:\d{2}\s*決行')
+
+
+def _has_decided_without_opinion(driver, timeout=5):
+    """核決區沒有「如擬」時的備援判定 —— 掃 top + 所有 iframe 的 body innerText,
+    找「N/N/N N:N:N 決行」時間戳記樣式。找到就視為等同如擬核准(見上方註解的
+    使用者確認)。
+
+    回 True/False。
+    """
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        try:
+            driver.switch_to.default_content()
+        except Exception:
+            pass
+        frames = [None]
+        try:
+            frames += driver.find_elements(By.XPATH, "//iframe | //frame")
+        except Exception:
+            pass
+        for ifr in frames:
+            try:
+                if ifr is not None:
+                    driver.switch_to.default_content()
+                    driver.switch_to.frame(ifr)
+                body_text = driver.execute_script(
+                    "return document.body ? document.body.innerText : '';") or ""
+            except Exception:
+                continue
+            if _DECIDED_TIMESTAMP_RE.search(body_text):
+                try:
+                    driver.switch_to.default_content()
+                except Exception:
+                    pass
+                return True
+        try:
+            driver.switch_to.default_content()
+        except Exception:
+            pass
+        time.sleep(0.3)
+    return False
+
+
 def _dump_frames_diagnostic(driver, keyword=_APPROVAL_KEYWORD):
     """『如擬』找不到時，dump 每個 frame 的關鍵狀態：URL、body 前 200 字、
     input/textarea value 前幾個，方便看是哪個 frame 沒進去、或關鍵字實際長啥樣。
@@ -1356,7 +1416,10 @@ def process_document_closure(driver, max_iterations=30):
             失敗則 return False(剩餘交給使用者手動)
 
     max_iterations(預設 30)是 runaway 保險:若 count 因某種理由沒下降,
-    達到上限就強制停止,避免無限迴圈。
+    達到上限就強制停止,避免無限迴圈。這個上限理論上很少真正撞到 —— 同一份
+    文件連續兩輪都還沒核決「如擬」時,下面的 _NO_APPROVAL_STREAK_LIMIT 閘門
+    會先提早停下(2026-07-27 事故:MWAA1156007442 遲遲沒核決,程式空轉了快
+    30 輪、5 分鐘才碰到 max_iterations,看起來像卡住)。
 
     給 standalone __main__、main.py FEATURES[2]、document_system.pending_closeout_doc
     delegate 共用同一入口。
@@ -1371,6 +1434,9 @@ def process_document_closure(driver, max_iterations=30):
     except Exception as e:
         print(f"[document_closure] 殘留目錄清理略過：{type(e).__name__}: {e}")
 
+    last_signed_doc_no = None
+    no_approval_streak_doc_no = None
+    no_approval_streak_count = 0
     for i in range(1, max_iterations + 1):
         count = _get_sidebar_paren_count(driver, "待結案")
         if count == 0:
@@ -1380,16 +1446,33 @@ def process_document_closure(driver, max_iterations=30):
             print("\n[document_closure] [ERROR] 無法判讀待結案數,中止迴圈")
             return False
         print(f"\n[document_closure] ═══ 第 {i} 輪(待結案剩 {count} 筆)═══")
-        ok = _process_one_pending_closure_doc(driver)
+        ok, last_signed_doc_no, no_approval_doc_no = _process_one_pending_closure_doc(
+            driver, last_signed_doc_no)
         if not ok:
             print(f"\n[document_closure] 第 {i} 輪失敗,中止迴圈(剩 {count} 筆未處理,"
                   "請手動處理或重跑)")
             return False
+
+        # 同一份文件連續好幾輪都還沒如擬 → 不用傻等它自己核決完,提早停下讓人知道
+        # (清單頂端沒變、也沒有任何簽章動作,單純是這份公文本身還沒核可)。
+        if no_approval_doc_no is not None and no_approval_doc_no == no_approval_streak_doc_no:
+            no_approval_streak_count += 1
+        elif no_approval_doc_no is not None:
+            no_approval_streak_doc_no = no_approval_doc_no
+            no_approval_streak_count = 1
+        else:
+            no_approval_streak_doc_no = None
+            no_approval_streak_count = 0
+        if no_approval_streak_count >= _NO_APPROVAL_STREAK_LIMIT:
+            print(f"\n[document_closure] 連續 {no_approval_streak_count} 輪待結案清單頂端都是"
+                  f"「{no_approval_streak_doc_no}」且還沒核決「如擬」— 這份公文本身還沒審完,"
+                  "不是程式卡住,先停下等它核決完成再重跑即可。")
+            return True
     print(f"\n[document_closure] [WARN] 達到 max_iterations={max_iterations},強制停止")
     return False
 
 
-def _process_one_pending_closure_doc(driver):
+def _process_one_pending_closure_doc(driver, last_signed_doc_no=None):
     """處理「待結案」清單第一筆公文(單筆)。driver 必須已導航到 edoc 公文首頁。
 
     流程：
@@ -1399,7 +1482,20 @@ def _process_one_pending_closure_doc(driver):
            - = 0：印「無待結案公文，跳過」
            - 判讀失敗 (-1)：印警告，return False
         3. 切回 default_content
-    回傳 True 表示流程跑完；False 表示前置檢查失敗。
+
+    last_signed_doc_no：上一輪本函式「已點確定存檔送出簽章」的公文文號(呼叫端
+    跨輪傳入/接回)。若這一輪清單頂端又是同一個文號，代表上一輪的存查可能沒有
+    真正在伺服器端生效(清單沒更新)，此時**不會**再點一次「確定存檔」— 對同一
+    份公文重複送簽章是不可逆動作，寧可中止讓人工檢查(2026-07-16 事故：清單
+    消失判定誤判成功，隔輪重複簽章，直到伺服器擋下 Error Code:6005 才曝光)。
+
+    回傳 (ok, signed_doc_no, no_approval_doc_no)：
+    - ok 同原本語義(True=流程跑完/False=失敗)
+    - signed_doc_no 是「本輪若送出了新的確定存檔簽章」則更新為該文號，否則原樣
+      傳回 last_signed_doc_no，供呼叫端下一輪繼續比對
+    - no_approval_doc_no 是「本輪因為還沒核決『如擬』而跳過」的文號，否則為
+      None；供呼叫端偵測「連續好幾輪都是同一份文件卡在還沒核決」，提早停下
+      不空轉。
     """
     from document_system import (
         _get_sidebar_paren_count,
@@ -1414,26 +1510,26 @@ def _process_one_pending_closure_doc(driver):
         current = driver.current_url
     except Exception as e:
         print(f"[ERROR] 讀 current_url 失敗：{type(e).__name__}: {e}")
-        return False
+        return False, last_signed_doc_no, None
 
     if "edoc.gov.taipei" not in current:
         print(f"[ERROR] 當前 URL 不在 edoc：{current}")
-        return False
+        return False, last_signed_doc_no, None
 
     # ── 待結案 ────────────────────────────────────────────────────────────
     print("[document_closure] 讀左側 sidebar「待結案」數...")
     count = _get_sidebar_paren_count(driver, "待結案")
     if count < 0:
         print("[document_closure] 無法判讀待結案數，保守不點，結束。")
-        return False
+        return False, last_signed_doc_no, None
     if count == 0:
         print("[document_closure] 待結案 = 0，無待辦，跳過。")
-        return True
+        return True, last_signed_doc_no, None
 
     print(f"[document_closure] 待結案 = {count}，點選進入...")
     if not _click_sidebar_item(driver, "待結案"):
         print("[document_closure] 點「待結案」失敗，請手動處理。")
-        return False
+        return False, last_signed_doc_no, None
 
     time.sleep(0.5)
     try:
@@ -1448,7 +1544,7 @@ def _process_one_pending_closure_doc(driver):
     print("[document_closure] 切到 dTreeContent frame...")
     if not _switch_to_frame_with_xpath(driver, target_xpath, "待結案清單表頭"):
         print("[document_closure] 切不到內容 frame，請手動處理。")
-        return False
+        return False, last_signed_doc_no, None
 
     # ── 點待結案清單第一筆公文、記下文號 ───────────────────────────────
     # 待結案與承辦中共用同一張含「公文文號」欄的表格，重用 document_system 的
@@ -1459,31 +1555,54 @@ def _process_one_pending_closure_doc(driver):
     if not doc_no:
         print("[document_closure] 點待結案公文失敗，請手動處理。")
         driver.switch_to.default_content()
-        return False
+        return False, last_signed_doc_no, None
 
     print("=" * 50)
     print(f"[document_closure] ★ 已選定待結案公文文號：{doc_no}")
     print("[document_closure] ★（此文號供後續選擇存查檔號使用）")
     print("=" * 50)
 
+    # ── 防重複簽章閘門 ────────────────────────────────────────────────────
+    # 上一輪已對這個文號點過「確定存檔」送出簽章 — 這一輪若又是同一個文號排在
+    # 清單頂端，代表上一輪的存查很可能沒有真正生效(伺服器端清單沒更新)。
+    # 在還沒開公文閱覽器 / 還沒動任何按鈕前就擋下來，避免對同一份公文重複簽章。
+    if doc_no == last_signed_doc_no:
+        print(f"[ERROR] 待結案清單頂端又是上一輪剛送出簽章的「{doc_no}」— "
+              "存查可能沒有真正在伺服器端生效(清單沒更新)。")
+        print(f"[ERROR] 為避免對同一份公文重複送出歸檔簽章(不可逆)，主動中止迴圈，"
+              f"不再點「確定存檔」。請手動到 edoc 確認「{doc_no}」實際狀態後再決定"
+              "是否重跑。")
+        driver.switch_to.default_content()
+        return False, last_signed_doc_no, None
+
     # 點公文後系統開新分頁(公文閱覽器),切回主文件並切到新分頁
     driver.switch_to.default_content()
     time.sleep(1)
     if not _switch_to_doc_viewer_window(driver):
         print("[document_closure] 切不到公文閱覽器分頁，無法判定核決狀態，結束。")
-        return False
+        return False, last_signed_doc_no, None
 
-    # ── 判定核決區是否有「如擬」 ───────────────────────────────────────
+    # ── 判定核決區是否有「如擬」(或代理人決行未寫意見的等同情形) ─────────
     print(f"[document_closure] 判定核決區是否有「{_APPROVAL_KEYWORD}」...")
-    if not _has_approval_text(driver, timeout=10):
+    approved = _has_approval_text(driver, timeout=10)
+    approve_reason = _APPROVAL_KEYWORD
+    if not approved:
+        approved = _has_decided_without_opinion(driver, timeout=5)
+        if approved:
+            approve_reason = "決行(代理人未寫意見,視為等同如擬)"
+            print(f"[document_closure] 核決區未見「{_APPROVAL_KEYWORD}」，"
+                  "但偵測到「決行」時間戳記且無意見文字 — 視為等同如擬核准,繼續執行。")
+    if not approved:
         print(f"[document_closure] 核決區未見「{_APPROVAL_KEYWORD}」，"
               "保守不下載(可能還在簽核或意見有異)。dump frame 內容供除錯:")
         _dump_frames_diagnostic(driver)
         print("[document_closure] 關閉公文閱覽器分頁...")
         _close_doc_viewer_window(driver)
-        return True
+        # 第三個回傳值標記「這輪因為還沒如擬而跳過的文號」,讓呼叫端可以偵測
+        # 「連續好幾輪都是同一份文件卡在還沒核決」,不用傻等 max_iterations。
+        return True, last_signed_doc_no, doc_no
 
-    print(f"[document_closure] ✓ 核決區有「{_APPROVAL_KEYWORD}」，"
+    print(f"[document_closure] ✓ 核決區判定通過（{approve_reason}），"
           f"進行結案存查下載到 {CLOSURE_DOWNLOAD_DIR}...")
 
     # ── 下載到 document_download_closure/ ───────────────────────────────
@@ -1494,7 +1613,7 @@ def _process_one_pending_closure_doc(driver):
         driver, download_dir=CLOSURE_DOWNLOAD_DIR, summarize=False)
     if not ok:
         print("[document_closure] 結案存查下載/解壓縮失敗。")
-        return False
+        return False, last_signed_doc_no, None
     if extract_dir:
         print(f"[document_closure] ✓ 結案存查下載完成，解壓到 {extract_dir}")
         # 把承辦中流程已產生的 meta 檔(*總結*.md + *內容.txt)一起歸檔到結案目錄
@@ -1519,12 +1638,12 @@ def _process_one_pending_closure_doc(driver):
     print(f"[document_closure] 在待結案清單找「{doc_no}」的列、勾選...")
     if not _check_pending_closeout_row(driver, doc_no):
         print("[document_closure] 勾選失敗,跳過存查表單流程(歸檔已成功)。")
-        return True
+        return True, last_signed_doc_no, None
 
     print("[document_closure] 點「存查」按鈕...")
     if not _click_archive_button(driver):
         print("[document_closure] 點「存查」失敗,跳過存查表單流程(歸檔已成功)。")
-        return True
+        return True, last_signed_doc_no, None
 
     # 驗證表單真的載入了 — 用「確定存檔」(只在存查表單出現的按鈕)當 sentinel,
     # 不能只用 doc_no(清單頁本就含 doc_no,verify 會偽陽性,先前實測就是中這招)。
@@ -1532,14 +1651,14 @@ def _process_one_pending_closure_doc(driver):
     if not _search_keyword_in_all_frames(driver, "確定存檔", timeout=15):
         print("[ERROR] 存查表單未載入(找不到「確定存檔」按鈕) — 「存查」點擊可能未生效。"
               "保持視窗不關閉,請手動檢查。")
-        return False
+        return False, last_signed_doc_no, None
 
     # 表單已載入,再驗證表單上的 doc_no 是否 = 剛勾選的 doc_no
     print(f"[document_closure] 表單已載入,驗證公文文號 = 「{doc_no}」...")
     if not _search_keyword_in_all_frames(driver, doc_no, timeout=3):
         print(f"[ERROR] 存查表單上看不到公文文號「{doc_no}」 — "
               "可能系統開錯表單(勾錯列了)。保持視窗不關閉,請手動檢查。")
-        return False
+        return False, last_signed_doc_no, None
 
     print(f"[document_closure] ✓ 存查表單已載入且公文文號確認 = 「{doc_no}」")
 
@@ -1548,13 +1667,13 @@ def _process_one_pending_closure_doc(driver):
     category = _read_archive_category_from_summary(doc_no)
     if not category:
         print("[ERROR] 讀不到分類檔號(*總結.*.md 缺檔或格式不符),保持視窗,後續中止。")
-        return False
+        return False, last_signed_doc_no, None
 
     # 填到「檔號」第二格(0115 右側那格)
     print(f"[document_closure] 把檔號「{category}」填到表單 檔號 第二格...")
     if not _fill_archive_form_category_input(driver, category):
         print("[ERROR] 填檔號失敗,保持視窗供手動處理。")
-        return False
+        return False, last_signed_doc_no, None
 
     print(f"[document_closure] ✓ 已填入分類檔號「{category}」")
 
@@ -1562,13 +1681,13 @@ def _process_one_pending_closure_doc(driver):
     print("[document_closure] 選「案次號」第一個 option,等系統填「保存年限」...")
     if not _select_case_no_and_read_retention(driver):
         print("[ERROR] 案次號選取失敗,保持視窗供手動處理。")
-        return False
+        return False, last_signed_doc_no, None
 
     # 再次確認三必填欄位齊備(防呆:即使前面 step 都報 OK,送出前再實際讀回核對)
     print("[document_closure] 送出前再次 verify「檔號 / 案次號 / 保存年限」...")
     if not _verify_required_fields_filled(driver, category):
         print("[ERROR] 必填欄位未齊備,保持視窗,不點「確定存檔」。")
-        return False
+        return False, last_signed_doc_no, None
 
     # 暫存「檔號」(在主流程變數中,跨過 pinCode 視窗階段仍可參照)
     archived_category = category  # 點 確定存檔 後 form 內容會清掉,先存一份
@@ -1581,24 +1700,32 @@ def _process_one_pending_closure_doc(driver):
     print("[document_closure] 點「確定存檔」按鈕...")
     if not _click_confirm_save_button(driver):
         print("[ERROR] 點「確定存檔」失敗,保持視窗供手動處理。")
-        return False
+        return False, last_signed_doc_no, None
+
+    # 從這裡開始「確定存檔」已經點下去、簽章請求已送出 — 不論後面 PIN/verify
+    # 結果如何,下一輪都不能再對同一個 doc_no 重複走一次這個按鈕,所以立刻更新
+    # last_signed_doc_no(即使後面失敗也要記住,讓下一輪的防重複閘門能生效)。
+    last_signed_doc_no = doc_no
 
     # 處理 pinCode 視窗(KdApp localhost:16888/doPostMsg popup)
-    # 自動處理失敗(找不到 input / PIN 填不進去 / 找不到確定按鈕等)→ 程式停止自動
-    # 操作,但**不中止主流程** — 等使用者手動完成後,下一步 verify 仍會抓到
-    # doc_no 從清單消失,順利寫存查標記檔。
+    # 自動處理失敗(找不到 input / PIN 填不進去 / popup 逾時沒關等)→ 印警告讓使用者
+    # 知道簽章狀態不確定;仍繼續往下走 verify,讓使用者有機會手動完成 popup。
     print("[document_closure] 等 pinCode 視窗、自動填 PIN(讀 env.env)、按確定...")
     pin_auto_ok = _handle_pincode_popup(driver)
     if not pin_auto_ok:
-        print("[WARN] 自動 pinCode 處理未完成 — 若 popup 仍開著,請手動填 PIN + 按確定")
+        print("[WARN] 自動 pinCode 處理未完成或 popup 未確認關閉 — 若 popup 仍開著,"
+              "請手動填 PIN + 按確定")
         print("[WARN] 程式繼續到 verify 階段(timeout 30s),手動完成後會自動寫標記檔")
 
     # 確認 doc_no 已從「待結案」清單可見列消失 → 存查成功
     # timeout 設 30s:pinCode 自動填失敗時,給使用者手動完成 PIN 的時間
+    # 注意:此判定本身曾被證實不可靠(2026-07-16 事故),不能單獨信任 —
+    # 真正防線是上面的 last_signed_doc_no 閘門,這裡失敗只代表「這輪沒把握」,
+    # 不代表沒簽過章,所以不論結果都不清掉 last_signed_doc_no。
     print(f"[document_closure] 確認 doc_no「{doc_no}」已從待結案清單消失(等候 30s)...")
     if not _verify_archive_success_by_listing(driver, doc_no, timeout=30):
         print("[WARN] doc_no 仍在頁面,存查可能未完成 — 不寫標記,保持視窗供檢查。")
-        return False
+        return False, last_signed_doc_no, None
 
     # 在結案目錄寫存查完成標記檔
     closure_target = os.path.join(CLOSURE_DOWNLOAD_DIR, doc_no)
@@ -1615,7 +1742,7 @@ def _process_one_pending_closure_doc(driver):
 
     print(f"[document_closure] ✓ 已完成存查(公文 {doc_no} 歸檔到檔號 {archived_category})")
     print("[document_closure] 結案存查流程結束。")
-    return True
+    return True, last_signed_doc_no, None
 
 
 if __name__ == "__main__":

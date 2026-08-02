@@ -1220,6 +1220,212 @@ def pending_doc(driver, label="承辦中"):
         print(f"[pending_doc] iteration #{iteration} 公文已離開{label},回頂繼續迴圈。")
 
 
+# ── 備料模式(FEATURES[3] / py main.py 4):下載+總結,不擬辦/不陳會 ─────────────
+# 設計背景:全自動版 pending_doc 靠「公文陳會後離開清單」推進迴圈;備料模式不陳會,
+# 公文會留在承辦中清單,故不能沿用 pending_doc(會在第一筆卡 STOP)。改成:一次收集
+# 清單所有公文號 → 逐筆針對該公文號點開 → 下載+總結 → 關閉閱覽器分頁 → 下一筆。
+
+def _collect_pending_doc_nos(driver):
+    """讀目前清單 frame「公文文號」欄的所有公文號,回 list(依畫面順序、去重)。
+
+    需先切到含「公文文號」表頭的 frame。用與 _click_first_document_in_pending 相同的
+    column-index 策略,但回收整欄而非第一筆。找不到 → 回 []。
+    """
+    js = r"""
+        var pat = /^[A-Z][A-Z0-9]*\d{4,}$/;
+        var out = [];
+        var ths = document.querySelectorAll('th');
+        for (var i = 0; i < ths.length; i++) {
+            if ((ths[i].textContent || '').trim().indexOf('公文文號') === -1) continue;
+            var headerRow = ths[i].parentElement;
+            if (!headerRow) continue;
+            var idx = -1;
+            for (var j = 0; j < headerRow.children.length; j++) {
+                if (headerRow.children[j] === ths[i]) { idx = j; break; }
+            }
+            if (idx === -1) continue;
+            var table = ths[i].closest('table');
+            if (!table) continue;
+            var rows = table.querySelectorAll('tbody tr');
+            for (var k = 0; k < rows.length; k++) {
+                var cells = rows[k].children;
+                if (idx >= cells.length) continue;
+                var t = (cells[idx].textContent || '').trim();
+                if (pat.test(t) && out.indexOf(t) === -1) out.push(t);
+            }
+            break;
+        }
+        return out;
+    """
+    try:
+        return driver.execute_script(js) or []
+    except Exception as e:
+        print(f"[prep] 收集公文號失敗:{type(e).__name__}: {e}")
+        return []
+
+
+def _click_doc_by_no(driver, doc_no):
+    """在目前清單 frame 內點選指定公文號那一列的連結(textContent === doc_no 的葉子元素)。"""
+    js = """
+        var target = arguments[0];
+        var all = document.querySelectorAll('a, span, td, div, input, button');
+        for (var i = 0; i < all.length; i++) {
+            var el = all[i];
+            if (el.offsetParent === null) continue;
+            var text = (el.tagName === 'INPUT' ? (el.value || '') : (el.textContent || '')).trim();
+            if (text !== target) continue;
+            var kids = el.querySelectorAll('*');
+            var hasSameTextChild = false;
+            for (var k = 0; k < kids.length; k++) {
+                var ct = (kids[k].textContent || kids[k].value || '').trim();
+                if (ct === target) { hasSameTextChild = true; break; }
+            }
+            if (hasSameTextChild) continue;
+            el.scrollIntoView({block:'center'});
+            el.click();
+            return true;
+        }
+        return false;
+    """
+    try:
+        ok = driver.execute_script(js, doc_no)
+        print(f"      {'OK:點到' if ok else 'x  清單內找不到可點的'}公文「{doc_no}」")
+        return bool(ok)
+    except Exception as e:
+        print(f"      x  點公文「{doc_no}」失敗:{type(e).__name__}: {e}")
+        return False
+
+
+def _prep_already_done(doc_no):
+    """備料去重:document_download/<doc_no>/ 內已有 *總結*.md → 視為已備料。
+
+    KdApp 匯出的 zip 檔名即公文號,解壓目錄名 = 公文號,故以此對應。萬一命名有出入
+    最壞情況只是重新下載一次(summarize 會自行略過已存在的總結),不會出錯。
+    """
+    import os
+    import glob
+    from pending_doc_handler import DOWNLOAD_DIR
+    d = os.path.join(DOWNLOAD_DIR, doc_no)
+    return os.path.isdir(d) and bool(glob.glob(os.path.join(d, "*總結*.md")))
+
+
+def pending_doc_prep(driver, label="承辦中"):
+    """備料版<label>處理:對清單內每一筆公文下載+LLM 總結,不擬辦、不陳會。回 True/False。"""
+    print(f"[prep] {label}備料流程開始(下載+總結,不擬辦)")
+    try:
+        main_handle = driver.current_window_handle
+    except Exception as e:
+        print(f"[prep] 讀 main_handle 失敗:{type(e).__name__}: {e}")
+        return False
+
+    from pending_doc_handler import handle_opened_document
+    try:
+        from document_closure.document_closure import _close_doc_viewer_window
+    except Exception:
+        _close_doc_viewer_window = None
+
+    xpath = "//th[contains(normalize-space(), '公文文號')]"
+    driver.switch_to.default_content()
+    if not _switch_to_frame_with_xpath(driver, xpath, "公文文號表頭"):
+        _print_stop_banner(f"切不到{label}清單 frame",
+                           "請手動檢視主 window 內容,然後再跑 python main.py 4")
+        return False
+    doc_nos = _collect_pending_doc_nos(driver)
+    if not doc_nos:
+        print(f"[prep] {label}清單沒讀到任何公文號,結束。")
+        return True
+    print(f"[prep] {label}清單共 {len(doc_nos)} 筆:{doc_nos}")
+
+    done = 0
+    for i, doc_no in enumerate(doc_nos, 1):
+        print(f"[prep] ({i}/{len(doc_nos)}) 處理 {doc_no}")
+        if _prep_already_done(doc_no):
+            print("[prep]   已有總結,跳過。")
+            done += 1
+            continue
+        driver.switch_to.window(main_handle)
+        driver.switch_to.default_content()
+        if not _switch_to_frame_with_xpath(driver, xpath, "公文文號表頭"):
+            print(f"[prep]   切不到清單 frame,跳過 {doc_no}")
+            continue
+        if not _click_doc_by_no(driver, doc_no):
+            continue
+        time.sleep(1)
+        driver.switch_to.default_content()
+        handle_opened_document(driver, do_fill_draft=False)
+        if _close_doc_viewer_window is not None:
+            _close_doc_viewer_window(driver)
+        else:
+            try:
+                for h in list(driver.window_handles):
+                    if h != main_handle:
+                        driver.switch_to.window(h)
+                        driver.close()
+                driver.switch_to.window(main_handle)
+            except Exception:
+                pass
+        done += 1
+        time.sleep(1)
+
+    print(f"[prep] {label}備料完成,共處理 {done}/{len(doc_nos)} 筆。")
+    return True
+
+
+def process_document_prep(driver):
+    """備料模式主入口(FEATURES[3] / py main.py 4)。
+
+    前置(催辦/待簽收簽收)與 process_document_system 相同 — 刻意重用其模組級 helper,
+    不動 process_document_system 本體,保留全自動路徑原樣。承辦中/受會案件改走
+    pending_doc_prep(只下載+總結)。擬辦與陳核(含代理公文的不同陳核路徑)由使用者手動。
+    """
+    print("[prep] 開始備料(下載+LLM 總結,不擬辦/不陳會)...")
+    try:
+        current = driver.current_url
+    except Exception as e:
+        print(f"[ERROR] 讀 current_url 失敗:{type(e).__name__}: {e}")
+        return False
+    if "edoc.gov.taipei" not in current:
+        print(f"[ERROR] 當前 URL 不在 edoc:{current}")
+        return False
+
+    try:
+        from pending_doc_handler import _sweep_empty_pending_dirs
+        _sweep_empty_pending_dirs()
+    except Exception as e:
+        print(f"[prep] 殘留目錄清理略過:{type(e).__name__}: {e}")
+
+    urgent_count = _get_urgent_message_count(driver)
+    if urgent_count > 0:
+        print(f"[prep] 催辦訊息 = {urgent_count},進催辦頁簽收...")
+        if _click_urgent_message(driver):
+            time.sleep(2)
+            _select_all_and_signoff(driver, urgent_count, "催辦通知")
+
+    signoff_count = _get_pending_signoff_count(driver)
+    if signoff_count > 0:
+        print(f"[prep] 待簽收 = {signoff_count},進待簽收清單簽收...")
+        if _click_pending_signoff(driver):
+            time.sleep(2)
+            _select_all_and_signoff(driver, signoff_count, "待簽收")
+
+    # 承辦中 + 受會案件 各自備料(不碰待結案 — 結案存查是另一條全自動流程)
+    for label in ("承辦中", "受會案件"):
+        try:
+            driver.switch_to.default_content()
+        except Exception:
+            pass
+        count = _get_sidebar_paren_count(driver, label)
+        print(f"[prep] sidebar {label} = {count}")
+        if count > 0:
+            if _click_sidebar_item(driver, label):
+                time.sleep(0.5)
+                pending_doc_prep(driver, label=label)
+            else:
+                print(f"[prep] 點「{label}」失敗,跳過。")
+    print("[prep] 備料流程結束。")
+    return True
+
+
 def _print_stop_banner(reason, advice):
     """在 stdout 印明顯區隔的停下訊息,使用者在 PowerShell 容易看到。"""
     bar = "=" * 70

@@ -1146,11 +1146,17 @@ def _download_and_extract(driver, download_dir=None, summarize=True):
     return True, extract_dir
 
 
-def handle_opened_document(driver):
+def handle_opened_document(driver, do_fill_draft=True):
     """承辦中公文點完最上方 link、新分頁開啟後的處理流程。
 
     呼叫時機:document_system.pending_doc 點完公文 + sleep 等新 window 開啟之後。
     driver focus 仍在原(承辦中清單) window;本函式負責切到新公文閱覽器分頁。
+
+    參數:
+    - do_fill_draft:是否在下載+總結後接著跑 4-2 fill_in_draft(擬辦+陳會)。
+      預設 True(全自動流程 process_document_system)。備料模式 process_document_prep
+      傳 False — 只下載+LLM 總結,擬辦/陳核留給使用者手動處理(代理公文陳核路徑
+      因人而異,系統不代為判斷)。
 
     流程:
     1. 確認 window_handles 數 > 1 (新分頁已開)
@@ -1158,7 +1164,7 @@ def handle_opened_document(driver):
     3. 等載入 + 印 URL/title 確認到位
     4. 呼叫 _download_and_extract:點 toolbar 下載按鈕、下載到
        document_download/、若為 zip 解到以檔名為路徑的子目錄
-    5. TODO:後續動作 (檢視內容/簽辦/送件/結案等)
+    5. do_fill_draft=True 才跑 4-2 擬辦;False 則到此為止
 
     回 True 表示順利切換並完成下載+解壓縮;False 表示沒找到新 window、
     切換失敗、或下載/解壓縮中途失敗。
@@ -1211,6 +1217,9 @@ def handle_opened_document(driver):
 
     # 4-2:依公文標記擬寫辦理文字、儲存、依標記決定不動作/陳會。
     # 容錯:fill_in_draft 不 raise,失敗只回 False,不影響已完成的下載/總結。
+    if not do_fill_draft:
+        print("[pending_doc_handler] 備料模式:略過 4-2 擬辦/陳會,只保留下載+總結。")
+        return True
     if extract_dir:
         try:
             from fill_in_draft import fill_in_draft

@@ -98,9 +98,26 @@ def test_no_handling_line_still_parses_with_none_handling():
 
 
 def test_should_post_true_when_handling_contains_keyword():
-    assert ANNOUNCE_KEYWORD == "於官網公告"
+    """新舊兩種承辦文字都要認得。
+
+    2026-07-28 起 summarize_doc.md 改用承辦人慣用句「一、於學校公告欄公佈周知。
+    二、文存備查。」；舊總結檔仍是「於官網公告…」，兩者都得判為要公告。
+    """
+    from document_closure.document_closure_post_web import ANNOUNCE_KEYWORDS
+    assert "於官網公告" in ANNOUNCE_KEYWORDS          # 舊句型不可被移除
     assert _should_post({"handling": "於官網公告，並轉知各處室及師生"}) is True
     assert _should_post({"handling": "於官網公告"}) is True
+    assert _should_post({"handling": "一、於學校公告欄公佈周知。二、文存備查。"}) is True
+    assert _should_post({"handling": "一、於學校公告欄公佈周知。二、文存備查。"
+                                     "（建議轉知：資訊教師）"}) is True
+
+
+def test_should_post_false_for_non_announce_handlings():
+    """新規則下這三種擬辦都不該上校網。"""
+    for h in ("一、本校目前無參加計畫。二、文存備查。",
+              "一、轉知生活科技教師。二、文存備查。",
+              "（請自行填寫：本案為回覆本校申請）"):
+        assert _should_post({"handling": h}) is False, h
 
 
 def test_should_post_false_when_keyword_absent_or_none():
@@ -129,16 +146,49 @@ import document_closure.document_closure_post_web as pw
 from document_closure.document_closure_post_web import _body_to_html
 
 
-def test_body_to_html_one_paragraph_per_line():
+def test_body_to_html_legacy_one_paragraph_per_line(monkeypatch):
+    monkeypatch.setattr(pw, "USE_SSSH_STYLE", False)
     assert _body_to_html("1. 甲\n2. 乙") == "<p>1. 甲</p><p>2. 乙</p>"
 
 
-def test_body_to_html_skips_blank_lines():
+def test_body_to_html_legacy_skips_blank_lines(monkeypatch):
+    monkeypatch.setattr(pw, "USE_SSSH_STYLE", False)
     assert _body_to_html("1. 甲\n\n2. 乙\n") == "<p>1. 甲</p><p>2. 乙</p>"
 
 
-def test_body_to_html_escapes_html_chars():
+def test_body_to_html_legacy_escapes_html_chars(monkeypatch):
+    monkeypatch.setattr(pw, "USE_SSSH_STYLE", False)
     assert _body_to_html("a < b & c") == "<p>a &lt; b &amp; c</p>"
+
+
+def test_body_to_html_sssh_style_wraps_in_section():
+    out = _body_to_html("1. 甲\n2. 乙", "主旨甲乙")
+    assert out.startswith("<section")
+    assert "甲" in out and "乙" in out
+
+
+def test_body_to_html_sssh_style_still_escapes():
+    out = _body_to_html("a < b & c")
+    assert "a &lt; b &amp; c" in out
+    assert "a < b" not in out
+
+
+def test_body_to_html_sssh_style_does_not_repeat_title():
+    """校網布告欄本身有標題列 — 內容區不可再出現一次主旨。"""
+    out = _body_to_html("1. 甲", "這是主旨不該重複")
+    assert "這是主旨不該重複" not in out
+
+
+def test_body_to_html_falls_back_when_renderer_broken(monkeypatch, capsys):
+    """版型出事不能擋掉公告 — 一律退回舊版逐行 <p>。"""
+    import document_closure.sssh_style as ss
+
+    def boom(*a, **k):
+        raise RuntimeError("版型爆了")
+
+    monkeypatch.setattr(ss, "render_fragment", boom)
+    assert _body_to_html("1. 甲\n2. 乙", "主旨") == "<p>1. 甲</p><p>2. 乙</p>"
+    assert "退回純段落" in capsys.readouterr().out
 
 
 def _make_doc_dir(tmp_path, base="12345_678"):
@@ -355,11 +405,119 @@ def test_parse_sync_categories_from_quad_hash():
 def test_find_attachments_matches_attch_files(tmp_path):
     import os as _os
     d = tmp_path / "doc"; d.mkdir()
-    (d / "123_456.pdf").write_text("x", encoding="utf-8")
-    (d / "123_456_ATTCH1.pdf").write_text("x", encoding="utf-8")
-    (d / "123_456_ATTCH2.pdf").write_text("x", encoding="utf-8")
+    (d / "123_456.pdf").write_text("main", encoding="utf-8")
+    (d / "123_456_ATTCH1.pdf").write_text("one", encoding="utf-8")
+    (d / "123_456_ATTCH2.pdf").write_text("two", encoding="utf-8")
     (d / "123_456內容.txt").write_text("x", encoding="utf-8")
     got = pw._find_attachments(str(d))
     assert len(got) == 2
     assert all("ATTCH" in _os.path.basename(g) for g in got)
     assert all(_os.path.isabs(g) for g in got)
+
+
+def test_find_attachments_collapses_identical_files(tmp_path):
+    """內容完全相同的兩個附件只上傳一次 —— 同一份東西傳兩遍對讀者沒意義。"""
+    d = tmp_path / "doc"; d.mkdir()
+    (d / "123_456_ATTCH1.pdf").write_bytes(b"same")
+    (d / "123_456_ATTCH2.pdf").write_bytes(b"same")
+    assert len(pw._find_attachments(str(d))) == 1
+
+
+# ── 附件挑選（2026-07-28：改名優先）───────────────────────────────────────
+
+from document_closure.document_closure_post_web import _find_attachments  # noqa: E402
+
+
+def _mk(d, name, data=b"x"):
+    p = d / name
+    p.parent.mkdir(parents=True, exist_ok=True)
+    p.write_bytes(data)
+    return str(p)
+
+
+def test_attachment_prefers_renamed_over_attch(tmp_path):
+    """同一份內容有兩個檔名 → 挑承辦人改過名的那個,家長才看得懂。"""
+    _mk(tmp_path, "28662754_1150518003_ATTCH1.pdf", b"same-bytes")
+    good = _mk(tmp_path, "AI素養教師工作坊 活動簡章.pdf", b"same-bytes")
+    assert _find_attachments(str(tmp_path)) == [good]
+
+
+def test_attachment_keeps_unrenamed_ones(tmp_path):
+    """只有部分改名時,沒改名的照樣要傳,不可以漏。"""
+    renamed = _mk(tmp_path, "研習議程.pdf", b"aaa")
+    _mk(tmp_path, "1_2_ATTCH1.pdf", b"aaa")          # 與上同內容
+    raw2 = _mk(tmp_path, "1_2_ATTCH2.png", b"bbb")   # 沒有對應改名檔
+    assert _find_attachments(str(tmp_path)) == sorted([renamed, raw2])
+
+
+def test_attachment_excludes_main_doc_opinion_and_merged(tmp_path):
+    _mk(tmp_path, "28959924_1153076269.pdf", b"main")
+    _mk(tmp_path, "1156006621_1_01413168886(opinion).pdf", b"op")
+    _mk(tmp_path, "合併版.pdf", b"merged")
+    keep = _mk(tmp_path, "活動計畫.pdf", b"plan")
+    assert _find_attachments(str(tmp_path)) == [keep]
+
+
+def test_attachment_excludes_project_artifacts(tmp_path):
+    _mk(tmp_path, "1_2內容.txt", b"c")
+    _mk(tmp_path, "1_2總結.claude.md", b"s")
+    _mk(tmp_path, "1_2已公告.txt", b"m")
+    _mk(tmp_path, "1_2總結.claude.md.bak", b"b")
+    assert _find_attachments(str(tmp_path)) == []
+
+
+def test_attachment_searches_subdirectories(tmp_path):
+    """歸檔後附件在「來文/」子目錄裡,也要找得到。"""
+    p = _mk(tmp_path, "來文/活動簡章.pdf", b"z")
+    assert _find_attachments(str(tmp_path)) == [p]
+
+
+def test_attachment_empty_dir(tmp_path):
+    assert _find_attachments(str(tmp_path)) == []
+
+
+# ── 逐檔勾選優先於自動判斷（2026-07-29）───────────────────────────────────
+
+def test_attach_choice_overrides_auto(tmp_path):
+    """「是附件」不等於「要上傳」—— 勾了什麼就傳什麼。"""
+    import json as _json
+    d = tmp_path / "doc"; d.mkdir()
+    (d / "1_2_ATTCH1.pdf").write_bytes(b"a")
+    (d / "1_2_ATTCH2.pdf").write_bytes(b"b")
+    assert len(pw._find_attachments(str(d))) == 2          # 預設兩個都算
+    (d / pw.ATTACH_CHOICE_FILE).write_text(
+        _json.dumps(["1_2_ATTCH2.pdf"]), encoding="utf-8")
+    got = pw._find_attachments(str(d))
+    assert [_os_basename(g) for g in got] == ["1_2_ATTCH2.pdf"]
+
+
+def test_attach_choice_can_include_non_attachment(tmp_path):
+    """有時要傳的是自動判斷排除掉的檔（例如合併版）—— 勾了就該傳。"""
+    import json as _json
+    d = tmp_path / "doc"; d.mkdir()
+    (d / "1_2_ATTCH1.pdf").write_bytes(b"a")
+    (d / "合併版.pdf").write_bytes(b"m")
+    (d / pw.ATTACH_CHOICE_FILE).write_text(
+        _json.dumps(["合併版.pdf"]), encoding="utf-8")
+    assert [_os_basename(g) for g in pw._find_attachments(str(d))] == ["合併版.pdf"]
+
+
+def test_empty_choice_means_upload_nothing(tmp_path):
+    """全部取消勾選 = 一個都不傳,不可以退回自動判斷。"""
+    import json as _json
+    d = tmp_path / "doc"; d.mkdir()
+    (d / "1_2_ATTCH1.pdf").write_bytes(b"a")
+    (d / pw.ATTACH_CHOICE_FILE).write_text("[]", encoding="utf-8")
+    assert pw._find_attachments(str(d)) == []
+
+
+def test_broken_choice_file_falls_back_to_auto(tmp_path):
+    d = tmp_path / "doc"; d.mkdir()
+    (d / "1_2_ATTCH1.pdf").write_bytes(b"a")
+    (d / pw.ATTACH_CHOICE_FILE).write_text("{壞掉的", encoding="utf-8")
+    assert len(pw._find_attachments(str(d))) == 1
+
+
+def _os_basename(p):
+    import os
+    return os.path.basename(p)

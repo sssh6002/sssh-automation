@@ -20,8 +20,9 @@ from taipeion_login_selenium import (
 )
 from taipeion_login import login_taipeion
 from click_document import click_document_card
-from document_system import process_document_system
+from document_system import process_document_system, process_document_prep
 from document_closure.document_closure import process_document_closure
+from post_web_review import run_post_web_review
 from ime_utils import ensure_english_ime
 
 # 先把 stdout/stderr 落地到 run.log（與 main.py 同目錄）— 之後所有 print 都會
@@ -47,6 +48,10 @@ FEATURES = [
      login_taipeion, None, None),
     ("edoc 結案存查 — 自然人憑證登入 + 待結案處理（Selenium 版）",
      login_taipeion_selenium, click_document_card, process_document_closure),
+    ("edoc 備料 — 登入 + 下載 + LLM 摘要（不擬辦/不陳會,擬辦與陳核由你手動）",
+     login_taipeion_selenium, click_document_card, process_document_prep),
+    ("校網張貼（帶審核）— 掃描總結 + 逐筆確認 + 貼校網（不碰 edoc/不用讀卡機）",
+     run_post_web_review, None, None),
 ]
 
 

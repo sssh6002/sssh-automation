@@ -293,13 +293,19 @@ def _standalone_dump():
     return True
 
 
-def fill_in_draft(driver, extract_dir, config_path=CONFIG_PATH):
+def fill_in_draft(driver, extract_dir, config_path=CONFIG_PATH,
+                  fragment=None, action=None):
     """4-2 進入點:讀標記→查表→填承辦文字→儲存→依動作不動作/陳會。
+
+    fragment / action 若由呼叫端指定,就**不讀 *總結*.md** — 給批次送陳核用:
+    使用者在審核表(公告彙整.xlsx)改過的擬辦文字優先於機器產的總結檔。
+    兩者皆 None(預設)時行為與過去完全相同。
 
     全程不 raise:任何例外都記 log 並回 False,不影響 4-1 已完成的下載/總結。
     """
     try:
-        fragment, action = _read_action(extract_dir)
+        if fragment is None and action is None:
+            fragment, action = _read_action(extract_dir)
         default, template = _load_config(config_path)
         if fragment is None:
             fragment = default.get("承辦文字", "")
