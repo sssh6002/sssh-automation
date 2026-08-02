@@ -128,12 +128,28 @@ sssh_publish_unit=系管師群組
 ## 執行方式
 
 ```powershell
-py main.py          # 預設跑 FEATURES[0](Selenium + 點公文 + 公文系統處理)
+py main.py          # 預設跑 FEATURES[0](Selenium + 點公文 + 公文系統全自動:下載+摘要+擬辦+陳會)
 py main.py 2        # 跑 FEATURES[1](pyautogui 像素版備援,只到登入)
 py main.py 3        # 跑 FEATURES[2](Selenium + 點公文 + 結案存查)
+py main.py 4        # 跑 FEATURES[3](備料:登入 + 下載 + LLM 摘要,不擬辦/不陳會)
+py main.py 5        # 跑 FEATURES[4](校網張貼:掃描總結 + 逐筆確認 + 貼校網,不碰 edoc)
 ```
 
 執行前會 `taskkill /F /IM chrome.exe` 清掉所有 Chrome(含使用者個人 Chrome),跑完即退出回 shell。
+
+### 半自動工作流(擬辦/陳核自己來,只自動貼校網)
+
+適合「代理公文陳核路徑因人而異、不想讓系統代為判斷陳核」的情境。系統只做兩頭的粗工,
+中間的擬辦與陳核由你在 edoc 手動完成:
+
+1. `py main.py 4` — **備料**:登入 edoc、把承辦中/受會案件每一筆公文下載+跑 LLM 摘要,
+   就停(不擬辦、不陳會、不存查)。已有總結的自動跳過,可重複跑。產物在
+   `document_download/<公文號>/`(含 `總結.md` + 附件)。
+2. **你手動**:讀摘要 → 在 edoc 自己擬辦、自己走陳核路徑(代理公文的不同路徑你自己選)。
+3. `py main.py 5` — **貼校網**:掃描 `document_download/` 與 `document_download_closure/`,
+   挑出「有總結、承辦文字含『於官網公告』、尚未公告」的公文,逐筆在終端機顯示
+   標題/內容/分類/附件,問你 `y`(貼)/`n`(跳過)/`e`(開檔編輯 `總結.md` 後再問);
+   按 `y` 才開一個乾淨 Chrome、用校網帳密登入、發佈公告。**此模式完全不碰 edoc、不用讀卡機**。
 
 ### 階段測試入口
 
@@ -142,6 +158,7 @@ py main.py 3        # 跑 FEATURES[2](Selenium + 點公文 + 結案存查)
 ```powershell
 py document_system.py        # 從 edoc 公文系統入口往下跑
 py pending_doc_handler.py    # 同 document_system 路徑,只是訊號燈擺在閱覽器分頁
+py post_web_review.py        # 校網張貼(帶審核)— 同 py main.py 5,不碰 edoc
 ```
 
 ## 功能說明
