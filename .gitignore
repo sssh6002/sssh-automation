@@ -26,6 +26,15 @@ final_state.png
 env.env
 id.txt
 
+# 審核表與任何試算表（含公文主旨／摘要／承辦人親筆擬辦，嚴禁推上 GitHub）
+# 這個 repo 是 public fork，一旦 commit 過就算之後刪掉也還留在 git 歷史裡，
+# 等於永久公開。預設全擋，之後真要納管某個 xlsx 再用 ! 開例外。
+*.xlsx
+*.xlsm
+*.xls
+*.csv
+公告彙整.xlsx
+
 #目錄
 document_download/*
 document_download_closure/*
