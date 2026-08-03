@@ -53,6 +53,36 @@ def _should_announce(doc_dir):
     return _should_post(_parse_summary(doc_dir))
 
 
+def _is_sent(row, doc_dir):
+    """這份公文是否**已經送出陳核**(或已存查)。
+
+    給 --sent-only 用:已陳核代表擬辦定稿了,這時候產公告文案才不會白做
+    (還沒陳核的擬辦可能被承辦人改掉,文案跟著要重產)。
+
+    **不能只看審核表「陳會」欄**:那一欄打「OK」的意思是「請程式去送」,
+    程式送出後不會把它改寫成「已辦」(upsert 只填空白格),所以正常流程送出去的
+    公文,欄位會一直停在「OK」。只看欄位會把它們全部誤判成「還沒陳核」。
+    2026-08-03 在 review_sheet.is_archived 踩過同一個坑,這裡直接以磁碟痕跡為準。
+
+    判定(任一成立即為真):
+    - 目錄內有 *已陳核.txt 或 *已存查.txt
+    - 目錄位在 document_download_closure/(能進到待結案,代表陳核一定跑過了)
+    - 審核表「陳會」欄標為已辦(你自己手動辦掉的)
+    """
+    if rs.is_done(row.get("陳會")):
+        return True
+    if not doc_dir or not os.path.isdir(doc_dir):
+        return False
+    try:
+        names = os.listdir(doc_dir)
+    except OSError:
+        return False
+    if any(n.endswith("已陳核.txt") or n.endswith("已存查.txt") for n in names):
+        return True
+    parent = os.path.basename(os.path.dirname(os.path.normpath(doc_dir)))
+    return parent.endswith("_closure")
+
+
 _CJK_NUM_RE = re.compile(r"^[*\s]*([一二三四五六七八九十]+)、\s*(.+?)[*\s]*$")
 # 區塊標題行:【…】前後只准有 emoji／符號／空白／markdown 星號。
 # 不用 `.{0,3}` — 實測 LLM 會吐 `**⚠️【注意事項】**`、`⚠️ 【注意事項】` 等變形,
@@ -121,11 +151,13 @@ def _content_of(doc_dir):
     return open(hits[0], encoding="utf-8").read()
 
 
-def plan(path=None, overwrite=False, only=None):
+def plan(path=None, overwrite=False, only=None, sent_only=False):
     """回 (要跑的清單, 略過清單)。
 
     only  — 只處理這些文號(可為單一字串或清單)。重產文案時建議指名對象,
             不要用 --limit 亂槍打鳥。
+    sent_only — 只處理**已陳核**的公文(判定見 _is_sent)。還沒陳核的擬辦可能
+            還會被改,先產文案容易白做。
     護欄 — 「張貼」或「陳會」欄已打 OK 的列,**即使 overwrite=True 也不動**。
             打了 OK 代表承辦人審過、那是定稿,程式沒有權力蓋掉。
             (2026-07-28 教訓:--overwrite --limit 1 把承辦人手寫的公告蓋掉三次。)
@@ -153,6 +185,8 @@ def plan(path=None, overwrite=False, only=None):
         approved = [g for g in rs.GATES if rs.is_approved(row.get(g))]
         if d is None:
             item["略過"] = "找不到公文目錄"
+        elif sent_only and not _is_sent(row, d):
+            item["略過"] = "還沒陳核（--sent-only）"
         elif rs.is_done(row.get("張貼")):
             item["略過"] = "你已自己辦完（張貼欄標為已辦）"
         elif approved and (row.get("公告") or "").strip():
@@ -232,6 +266,8 @@ def main():
     ap.add_argument("--model", help=f"這次改用的模型（預設 {ANNOUNCE_MODEL_DEFAULT}）")
     ap.add_argument("--only", nargs="+", metavar="文號",
                     help="只跑指定文號（重產時請用這個，不要用 --limit）")
+    ap.add_argument("--sent-only", action="store_true",
+                    help="只跑已陳核的公文（還沒陳核的擬辦可能還會改，先產文案容易白做）")
     a = ap.parse_args()
 
     if a.show:
@@ -242,7 +278,7 @@ def main():
         print(f"審核表裡找不到 {a.show}")
         return
 
-    todo, skip = plan(a.path, a.overwrite, a.only)
+    todo, skip = plan(a.path, a.overwrite, a.only, a.sent_only)
     if a.limit:
         todo = todo[:a.limit]
 
