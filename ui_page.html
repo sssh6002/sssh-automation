@@ -253,6 +253,18 @@ function drawDetail(r, detail) {
         <span id="saved" class="msg"></span>
       </div>
     </div>
+    <div class="box">
+      <p class="fld">這筆的進度 <span>陳會 ${esc(r.陳會) || "（空）"}　·　張貼 ${
+        esc(r.張貼) || "（空）"}</span></p>
+      <div class="foot">
+        ${TAB === "old"
+          ? `<button id="undone">放回待辦</button>`
+          : `<button id="done" class="solid">這筆我辦完了</button>`}
+        <span id="donemsg" class="msg">${TAB === "old"
+          ? "放回去會清掉「陳會」「張貼」兩欄。"
+          : "自己在 edoc 辦完的按這裡，它會移到「舊文」。"}</span>
+      </div>
+    </div>
     ${files(detail, r)}`;
   const ta = el("draft");
   ta.oninput = () => {
@@ -261,6 +273,33 @@ function drawDetail(r, detail) {
     el("saved").textContent = "未存…";
     timer = setTimeout(() => save(r.文號, ta.value), 1000);
   };
+  // 「我辦完了」／「放回待辦」—— 就是把「陳會」「張貼」兩欄一起標成已辦或清空。
+  // 判定規則在 review_sheet.is_archived:兩關都已辦 = 你宣告辦完 → 進舊文。
+  const mark = async (val, doing) => {
+    const m = el("donemsg");
+    m.className = "msg"; m.textContent = doing;
+    const j = await (await fetch("/api/save", {
+      method: "POST",
+      body: JSON.stringify({ 文號: r.文號, 陳會: val, 張貼: val })
+    })).json();
+    if (!j.ok) { m.className = "msg err"; m.textContent = j.錯誤; return; }
+    const was = TAB;
+    await load();                      // 重讀清單,這筆會換頁
+    const still = ROWS.find(x => x.文號 === r.文號);
+    if (still && ((was === "old") === !!still.舊文)) {
+      // 沒換過去 —— 舊文那條磁碟痕跡(*已存查.txt／*已公告.txt)還在,清欄位擋不住它。
+      say("欄位已清空，但這筆資料夾裡有「已存查／已公告」標記，所以仍留在舊文。", "err");
+    } else {
+      CUR = null;
+      el("detail").innerHTML = '<div class="empty">左邊點一筆公文。</div>';
+      say(was === "old" ? "已放回待辦。" : "已移到「舊文」。", "ok");
+    }
+  };
+  const dn = el("done");
+  if (dn) dn.onclick = () => mark("已辦", "標記中…");
+  const un = el("undone");
+  if (un) un.onclick = () => mark("", "清空中…");
+
   const btn = el("openf");
   if (btn) btn.onclick = async () => {
     const s = el("openmsg");
