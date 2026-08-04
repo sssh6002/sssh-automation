@@ -356,9 +356,17 @@ def is_archived(row, doc_dir):
       MWAA1156007365 就是這個狀態 —— 只看欄位會讓「正常流程貼出去的公文」
       全部卡在待辦清單,等於這個功能失效。
 
-    doc_dir 為 None / 資料夾不在了 → 無從判斷,保守回 False(留在待辦清單,
-    寧可多看一眼也不要默默消失)。
+    **另一條路:你自己辦完的**(2026-08-03 補)。承辦人手動在 edoc 辦掉的公文,
+    工作區不會有任何標記檔 —— 程式沒跑過,當然寫不出痕跡。這種只能由承辦人自己
+    宣告:兩道關卡都標成「已辦」(或「不用」「跳過」等 DONE_TOKENS)即視為辦完。
+    標記方式:`python review_sheet.py --done <文號> <文號> …`
+
+    doc_dir 為 None / 資料夾不在了 → 走上面那條宣告路徑仍可成立(資料夾被搬走
+    或刪掉的舊公文,不該因此永遠卡在待辦);否則保守回 False。
     """
+    # 你自己宣告辦完 —— 不看磁碟,也不管資料夾還在不在。
+    if is_done(row.get("陳會")) and is_done(row.get("張貼")):
+        return True
     if not doc_dir or not os.path.isdir(doc_dir):
         return False
     try:
