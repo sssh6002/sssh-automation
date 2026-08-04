@@ -248,6 +248,30 @@ def detail_payload(doc_no):
 # 為什麼要背景跑:9 份公文大約 3～5 分鐘（每份下載 + 一次 LLM），
 # 瀏覽器的請求撐不了那麼久。
 
+def _launch_hud():
+    """開右下角的進度小浮窗（prep_hud.py）。
+
+    為什麼需要:`main.py` 登入時會把 Chrome 最大化,整片蓋掉這個網頁,承辦人
+    就看不到下面那個 #preplog 面板在跑什麼(2026-08-03 回報)。浮窗擺右下角、
+    置頂,蓋不住也不會擋到畫面中央的 KdApp 下載對話框。
+
+    **best-effort**:浮窗只是輔助,開不起來一律吞掉 —— 絕不能因為它而讓
+    收文工作起不來。用 pythonw 才不會多跳一個黑色主控台視窗。
+    """
+    try:
+        exe = sys.executable
+        w = os.path.join(os.path.dirname(exe), "pythonw.exe")
+        if os.path.exists(w):
+            exe = w
+        subprocess.Popen(
+            [exe, os.path.join(_BASE_DIR, "prep_hud.py"),
+             f"http://{HOST}:{PORT}", "0"],
+            cwd=_BASE_DIR,
+            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
+    except Exception as e:
+        print(f"[ui] 進度浮窗開不起來(不影響收文):{type(e).__name__}: {e}")
+
+
 class Prep:
     """同一時間只准跑一個。兩個 Selenium 搶同一個 Chrome 一定出事。"""
 
@@ -275,6 +299,7 @@ class Prep:
             except Exception as e:
                 return False, f"啟動失敗:{type(e).__name__}: {e}"
         threading.Thread(target=self._pump, daemon=True).start()
+        _launch_hud()
         return True, None
 
     def _pump(self):
