@@ -91,10 +91,40 @@
   .warnbox{background:#fff8ec;border:1px solid #f0dcbb;border-radius:8px;
            padding:10px 13px;font-size:13px;color:#6b4a12;margin:10px 0}
   .dlgfoot{display:flex;justify-content:flex-end;gap:10px;margin-top:16px}
+  /* ── 陳核頁 ───────────────────────────────────────────────────────────
+     這一頁沒有左邊清單（一次要看的是「整批會送什麼」，不是單筆），所以
+     .wrap 切成單欄。 */
+  .wrap.full{grid-template-columns:1fr}
+  .dlg.wide{max-width:640px;max-height:82vh;overflow-y:auto}
+  .danger{background:#fcebeb;border:1px solid #eec9c9;border-radius:8px;
+          padding:10px 13px;font-size:13px;color:#7d2020;margin:0 0 12px}
+  .danger b{color:var(--bad)}
+  .si{border:1px solid var(--line);border-radius:8px;padding:9px 12px;margin:0 0 8px;
+      background:#fbfdfc}
+  .si.go{border-color:#b9d4c9;background:#f3f9f6}
+  .si.no{border-color:#eec9c9;background:#fdf6f6}
+  .sh{display:flex;align-items:baseline;gap:8px}
+  .sh .no{font-size:13px;font-weight:700;white-space:nowrap}
+  .sh .su{flex:1;font-size:12px;color:var(--sub);
+          display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden}
+  .sh button{padding:3px 10px;font-size:12px;white-space:nowrap}
+  /* 實際會送進 edoc 的字。用等寬字＋框起來，跟旁邊的說明文字明顯分開 ——
+     承辦人要核對的就是這一段，不能跟畫面上其他字長得一樣。 */
+  .stxt{margin:7px 0 0;padding:8px 10px;background:#fff;border:1px solid var(--line);
+        border-radius:6px;font-family:Consolas,"Microsoft JhengHei",monospace;
+        font-size:13px;line-height:1.75;white-space:pre-wrap}
+  .why{font-size:13px;color:#7d2020;margin:5px 0 0}
+  .sendbar{position:sticky;bottom:0;background:var(--bg);border-top:1px solid var(--line);
+           padding:12px 0 4px;display:flex;align-items:center;gap:12px}
+  button.big{padding:10px 22px;font-size:15px;font-weight:700}
+  button.risk{background:var(--bad);border-color:var(--bad);color:#fff}
+  button.risk:hover{background:#8e2727}
+  button.risk:disabled{background:#d9b4b4;border-color:#d9b4b4}
 </style>
 
 <div class="tabs">
-  <div class="on" id="tablive">摘要</div><div class="soon">陳核</div><div class="soon">存查</div>
+  <div class="on" id="tablive">摘要</div><div class="click" id="tabsend">陳核</div>
+  <div class="soon">存查</div>
   <div class="soon">公告</div><div class="soon">張貼</div><div class="click" id="tabold">舊文</div>
   <div class="soon">設定</div>
 </div>
@@ -105,6 +135,10 @@
   <span class="grow"></span>
   <span id="msg" class="msg"></span>
   <button id="prep">收新公文 <span class="card-need">需插卡</span></button>
+  <!-- 送出鈕釘在這裡（不隨內容滾動）。2026-08-05 承辦人回報:原本只放在清單
+       最下面，畫面上唯一看得到的按鈕是每筆的「不送了」,他下意識以為那顆就是
+       「送去陳核」—— 在送出收不回來的頁面上，主動作不能藏在視線外。 -->
+  <button id="dosendtop" class="risk" hidden></button>
   <button id="reload">重新整理</button>
 </div>
 
@@ -133,6 +167,21 @@
     <div class="dlgfoot">
       <button id="askno">取消</button>
       <button id="askyes" class="solid">開始收文</button>
+    </div>
+  </div>
+</div>
+
+<div id="sendask" class="mask" hidden>
+  <div class="dlg wide">
+    <h2>確定要送出這些公文嗎？</h2>
+    <p class="danger"><b>送出去就收不回來。</b>下面每一筆的擬辦都會填進 edoc、
+      按「陳會」、用你的自然人憑證簽章。請最後看一次實際會送出的字。</p>
+    <div id="askitems"></div>
+    <p class="warnbox">過程中會操作 Chrome，<b>請不要動滑鼠鍵盤</b>。憑證要插著、螢幕不能鎖。
+      任何一筆出錯會整批停下來，已送出的不會重送。</p>
+    <div class="dlgfoot">
+      <button id="sendno">再想想</button>
+      <button id="sendyes" class="risk">確定送出</button>
     </div>
   </div>
 </div>
@@ -192,19 +241,29 @@ function drawList() {
     n.onclick = () => pick(view()[+n.dataset.i]));
 }
 
+const TITLE = { live: "摘要", old: "舊文", send: "陳核" };
+
 function setTab(t) {
   TAB = t;
-  el("tablive").className = t === "live" ? "on" : "click";
-  el("tabold").className = t === "old" ? "on" : "click";
-  el("title").textContent = t === "old" ? "舊文" : "摘要";
+  ["live", "old", "send"].forEach(k =>
+    el("tab" + k).className = t === k ? "on" : "click");
+  el("title").textContent = TITLE[t];
   // 換頁等於換清單,原本選的那筆多半不在新清單裡,右邊一併清掉免得對不上。
   CUR = null;
+  el("count").textContent = "";
+  // 陳核頁要看的是「整批會送什麼」,不是單筆 —— 收掉左邊清單、右邊佔滿。
+  el("list").hidden = t === "send";
+  document.querySelector(".wrap").classList.toggle("full", t === "send");
+  // 送出鈕只在陳核頁出現 —— 留在別的分頁上是誤觸來源。
+  el("dosendtop").hidden = true;
+  if (t === "send") return loadSend();
   el("detail").innerHTML = '<div class="empty">左邊點一筆公文。</div>';
   drawList();
 }
 
 el("tablive").onclick = () => setTab("live");
 el("tabold").onclick = () => setTab("old");
+el("tabsend").onclick = () => setTab("send");
 
 const KB = (n) => n >= 1048576 ? (n / 1048576).toFixed(1) + " MB"
                  : n >= 1024 ? Math.round(n / 1024) + " KB" : n + " B";
@@ -351,10 +410,169 @@ async function pick(r) {
   }
 }
 
-// ── 收新公文（背景跑 py main.py 4，把輸出接到畫面）──────────────────────
-let seen = 0, poll = null;
+// ── 陳核頁 ────────────────────────────────────────────────────────────────
+//
+// 這一頁**會真的把公文送出去，而且收不回來**。所以介面照 post_draft_batch.py
+// 那支 CLI 的設計走兩段:先看清單（這一頁）、再按確定（對話框最後一次核字）。
+// 沒有一鍵直送這種東西。
+//
+// 「要送／不送了」= 寫審核表的「陳會」欄（OK ↔ 空白），跟在 Excel 裡自己打 OK
+// 是同一件事 —— 所以承辦人改用 Excel 或 CLI 也照樣通，介面沒有另立一套狀態。
+//
+// 能不能送**不在這裡判斷**，一律由後端問 post_draft_batch.evaluate()。
+let PLAN = null;
+
+async function loadSend() {
+  say("清單計算中…（要翻每份公文的簽核意見找退文紀錄，會慢幾秒）");
+  el("detail").innerHTML = '<div class="empty">計算中…</div>';
+  try {
+    const j = await (await fetch("/api/send/plan")).json();
+    if (!j.ok) {
+      el("detail").innerHTML = "";
+      el("dosendtop").hidden = true;     // 清單都讀不到,更不該給送出鈕
+      return say(j.錯誤, "err");
+    }
+    PLAN = j;
+    drawSend();
+    say(j.訊息 || "", j.訊息 ? "err" : "");
+  } catch (e) { say("連不上程式，是不是關掉了？", "err"); }
+}
+
+// kind:go 會送出／goask 對話框裡最後核對用（不給按鈕）／no 勾了但被擋／cand 還沒勾
+function sendItem(it, kind) {
+  const blocked = !!it.擋下原因;
+  // 按鈕文字一律講清楚是「加入」還是「移除」。只寫「不送了」會被讀成
+  // 「這顆是送出鈕」（2026-08-05 承辦人回報）—— 動詞要帶方向。
+  const btn = kind === "goask" ? ""
+    : kind === "cand"
+      ? (blocked ? "" : `<button data-doc="${esc(it.文號)}" data-act="on"
+            >＋ 加入送出</button>`)
+      : `<button data-doc="${esc(it.文號)}" data-act="off">${
+          kind === "go" ? "✕ 這筆不送" : "✕ 取消勾選"}</button>`;
+  // 實際送進 edoc 的長相 = fill_in_draft.yaml 的模板:第一行「擬:」，第二行承辦文字。
+  const body = (kind === "go" || kind === "goask")
+    ? `<div class="stxt">擬:\n${esc(it.送出文字)}</div>` +
+      (it.移除的提示
+        ? `<p class="mut">已移除只給你看的提示：${esc(it.移除的提示)}（不會送進 edoc）</p>` : "")
+    : (blocked ? `<p class="why">✖ ${esc(it.擋下原因)}</p>` : "");
+  // 綠底只給「真的會送出去」的那幾筆 —— 被擋下的一律紅底，兩者不能撞色。
+  const cls = (kind === "go" || kind === "goask") ? "go" : blocked ? "no" : "";
+  // 已排進送出的掛一枚綠標,讓「這筆會被送」是看得出來的狀態,不是靠推理。
+  const tag = (kind === "go" || kind === "goask")
+    ? '<span class="pill ok">會送出</span>' : "";
+  return `<div class="si ${cls}">
+    <div class="sh"><span class="no">${esc(it.文號)}</span>${tag}
+      <span class="su">${esc(it.主旨)}</span>${btn}</div>${body}</div>`;
+}
+
+function drawSend() {
+  const go = PLAN.可送 || [], stuck = PLAN.擋下 || [], cand = PLAN.候選 || [];
+  // Chrome 沒開就先擋住 —— 讓人按下去才看到一片英文堆疊是最糟的。
+  const cr = PLAN.chrome || { ok: true };
+  el("count").textContent = `會送 ${go.length} 筆`;
+  const sec = (title, hint, items, kind, empty) => `
+    <div class="box">
+      <p class="fld">${title} <span>${hint}</span></p>
+      ${items.length ? items.map(it => sendItem(it, kind)).join("")
+                     : `<div class="mut">${empty}</div>`}
+    </div>`;
+  el("detail").innerHTML = `
+    <div class="danger">這一頁<b>會真的送出</b>：填擬辦 → 按「陳會」→ 憑證簽章，
+      <b>送出後收不回來</b>。開始前確認三件事：Chrome 開著且停在 edoc「承辦中」清單頁
+      （沒開就先按右上角「收新公文」）、自然人憑證插著、螢幕不要鎖。</div>
+    ${cr.ok ? "" : `<div class="note"><b>⛔ 現在送不出去：</b>${esc(cr.說明)}</div>`}
+    ${sec("會送出", `${go.length} 筆 · 下面框起來的就是實際填進 edoc 的字`, go, "go",
+          "還沒有。到下面「其他待辦」按「要送」把公文加進來。")}
+    ${stuck.length ? sec("你勾了要送，但送不出去",
+          `${stuck.length} 筆 · 程式不會碰這些，請自行在 edoc 處理`, stuck, "no", "") : ""}
+    ${sec("其他待辦", `${cand.length} 筆 · 按「要送」等於在審核表「陳會」欄打 OK`,
+          cand, "cand", "待辦都處理過了。")}
+    <div class="sendbar">
+      <button id="dosend" class="big risk" ${
+        go.length && cr.ok ? "" : "disabled"}>送出這 ${go.length} 筆</button>
+      <span class="mut">${cr.ok
+        ? "按下去會再問一次，並讓你看最後一遍要送出的字。"
+        : "Chrome 沒接上，現在送不了（原因見上面）。"}</span>
+    </div>`;
+  [...document.querySelectorAll("[data-doc]")].forEach(b =>
+    b.onclick = () => gate(b, b.dataset.act === "on" ? "OK" : ""));
+  el("dosend").onclick = askSend;
+  // 上面那顆與底下那顆是同一個動作,狀態要一起走,不然會出現「上面能按、
+  // 下面是灰的」這種鬼畫面。
+  const top = el("dosendtop");
+  top.hidden = false;
+  top.textContent = `送出這 ${go.length} 筆`;
+  top.disabled = !(go.length && cr.ok);
+  top.title = cr.ok ? "會再問一次才真的送" : (cr.說明 || "");
+  top.onclick = askSend;
+}
+
+// 勾／取消 —— 寫「陳會」欄，寫完重算清單（那筆會換到別堆去）。
+async function gate(btn, val) {
+  const doc = btn.dataset.doc;
+  btn.disabled = true;
+  btn.textContent = "存…";
+  try {
+    const j = await (await fetch("/api/save", {
+      method: "POST", body: JSON.stringify({ 文號: doc, 陳會: val })
+    })).json();
+    if (!j.ok) { btn.disabled = false; return say(j.錯誤, "err"); }
+  } catch (e) { btn.disabled = false; return say("存不進去：" + e, "err"); }
+  await loadSend();
+}
+
+function askSend() {
+  const go = (PLAN && PLAN.可送) || [];
+  if (!go.length) return;
+  el("askitems").innerHTML = go.map(it => sendItem(it, "goask")).join("");
+  show("sendask", true);
+}
+
+el("sendno").onclick = () => show("sendask", false);
+
+el("sendyes").onclick = async () => {
+  show("sendask", false);
+  const go = (PLAN && PLAN.可送) || [];
+  const j = await (await fetch("/api/send/start", {
+    method: "POST",
+    // 把畫面上這幾筆的文號一起送過去 —— 後端會拿它跟現算的清單對，
+    // 對不上就不送（中間有人動過 Excel、或又收了新公文）。
+    body: JSON.stringify({ 確認: true, 文號: go.map(it => it.文號) })
+  })).json();
+  if (!j.ok) return say(j.錯誤, "err");
+  say(`開始送出 ${j.筆數} 筆`);
+  watch("send");
+};
+
+// ── 背景工作:收新公文 / 送陳核 ───────────────────────────────────────────
+// 兩件事共用同一個進度面板與輪詢 —— 都是操作同一個 Chrome、都只能等它跑完，
+// 介面沒有理由長成兩套。後端 Job 也互斥，同一時間只會有一支在跑。
+let JOB = "prep", seen = 0, poll = null;
+const JOBTXT = {
+  prep: { run: "收新公文中…請不要動滑鼠", ok: "收文完成", stop: "停止" },
+  send: { run: "送陳核中…請不要動滑鼠", ok: "送出完成",
+          stop: "中止（目前這筆可能停在一半）" },
+};
 
 const show = (id, on) => el(id).hidden = !on;
+const PREPRUN = () => poll !== null;
+
+function watch(job) {
+  JOB = job;
+  seen = 0;
+  el("preplog").textContent = "";
+  el("prepstate").textContent = JOBTXT[job].run;
+  el("prepstop").textContent = JOBTXT[job].stop;
+  show("preppanel", true);
+  show("prepstop", true);
+  el("prep").disabled = true;
+  const s = el("dosend");
+  if (s) s.disabled = true;
+  el("dosendtop").disabled = true;      // 跑的時候兩顆都要按不下去
+  clearInterval(poll);
+  poll = setInterval(tick, 900);
+  tick();
+}
 
 el("prep").onclick = () => show("ask", true);
 el("askno").onclick = () => show("ask", false);
@@ -363,20 +581,11 @@ el("askyes").onclick = async () => {
   show("ask", false);
   const j = await (await fetch("/api/prep/start", { method: "POST" })).json();
   if (!j.ok) return say(j.錯誤, "err");
-  seen = 0;
-  el("preplog").textContent = "";
-  el("prepstate").textContent = "收新公文中…請不要動滑鼠";
-  show("preppanel", true);
-  show("prepstop", true);
-  el("prep").disabled = true;
-  poll = setInterval(tick, 900);
-  tick();
+  watch("prep");
 };
 
-const PREPRUN = () => poll !== null;
-
 el("prepstop").onclick = async () => {
-  const j = await (await fetch("/api/prep/stop", { method: "POST" })).json();
+  const j = await (await fetch(`/api/${JOB}/stop`, { method: "POST" })).json();
   // 已經跑完才按停止 → 後端說「沒有正在執行的工作」。以前這裡把回應吞掉，
   // 使用者按了完全沒反應，看起來像卡死。現在直接收起面板。
   if (!j.ok) show("preppanel", false);
@@ -385,7 +594,7 @@ el("prepclose").onclick = () => show("preppanel", false);
 
 async function tick() {
   let j;
-  try { j = await (await fetch("/api/prep/status?since=" + seen)).json(); }
+  try { j = await (await fetch(`/api/${JOB}/status?since=${seen}`)).json(); }
   catch (e) { return; }
   if (j.訊息 && j.訊息.length) {
     const box = el("preplog");
@@ -398,28 +607,25 @@ async function tick() {
     el("prep").disabled = false;
     show("prepstop", false);
     const good = j.結束碼 === 0;
-    el("prepstate").textContent = good ? "收文完成" : "已結束（有中斷或錯誤，請看上面訊息）";
-    await load();                            // 收完把新公文帶進清單
+    const txt = JOBTXT[JOB];
+    el("prepstate").textContent = good ? txt.ok : "已結束（有中斷或錯誤，請看上面訊息）";
+    // 跑完清單一定變了（收文多幾筆／送出的那幾筆有了已陳核.txt），重讀。
+    if (TAB === "send") await loadSend(); else await load();
     if (good) {
       // 成功就自己收起來 —— 面板一直開著，使用者不知道到底跑完了沒。
       // 失敗則留著，錯誤訊息要看得到。
-      el("prepstate").textContent = "收文完成，3 秒後自動關閉";
+      el("prepstate").textContent = txt.ok + "，3 秒後自動關閉";
       setTimeout(() => { if (!PREPRUN()) show("preppanel", false); }, 3000);
-      say("收文完成", "ok");
+      say(txt.ok, "ok");
     }
   }
 }
 
-el("reload").onclick = load;
+el("reload").onclick = () => TAB === "send" ? loadSend() : load();
 load();
-// 萬一頁面重整時工作還在跑,接回去繼續看
-fetch("/api/prep/status?since=0").then(r => r.json()).then(j => {
-  if (!j.執行中) return;
-  show("preppanel", true);
-  show("prepstop", true);
-  el("prep").disabled = true;
-  el("prepstate").textContent = "收新公文中…請不要動滑鼠";
-  poll = setInterval(tick, 900);
-  tick();
-});
+// 萬一頁面重整時工作還在跑,接回去繼續看。兩支都要問 —— 重整那一刻正在跑的
+// 可能是送陳核，接錯支就會盯著一個沒在動的面板。
+["prep", "send"].forEach(job =>
+  fetch(`/api/${job}/status?since=0`).then(r => r.json())
+    .then(j => { if (j.執行中) watch(job); }).catch(() => {}));
 </script>

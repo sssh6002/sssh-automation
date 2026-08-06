@@ -8,12 +8,14 @@ ui.py
 只用 Python 標準庫（http.server），不裝任何套件 —— 之後打包給其他處室時，
 對方不需要安裝環境。只綁 127.0.0.1，外面連不進來。
 
-目前實作:**摘要頁**（第一批）
-    左邊公文清單、右邊主旨／摘要／擬辦。擬辦可以直接改，改完自動存回
-    桌面的「公告彙整.xlsx」—— 所以既有的 post_draft_batch.py 照樣讀得到。
-
-刻意不做的事:這一頁**不會送出任何東西**。不碰 edoc、不碰讀卡機、不貼校網。
-改壞了頂多是表格內容要重來。
+目前實作:
+  **摘要頁**  左邊公文清單、右邊主旨／摘要／擬辦。擬辦可以直接改，改完自動存回
+              桌面的「公告彙整.xlsx」—— 所以既有的 post_draft_batch.py 照樣讀得到。
+              這一頁**不會送出任何東西**，改壞了頂多是表格內容要重來。
+  **舊文頁**  辦完的公文。
+  **陳核頁**  ⚠️ 這一頁**會真的送出**（呼叫 post_draft_batch.py --go）。
+              送陳核收不回來，所以介面照 CLI 的設計走兩段:先看清單、再按送出。
+              判定完全交給 post_draft_batch.evaluate()，介面不另立標準。
 """
 
 import json
@@ -240,6 +242,105 @@ def detail_payload(doc_no):
     return info
 
 
+# ── 陳核頁 ─────────────────────────────────────────────────────────────────
+#
+# 這一頁是**唯一會送出東西**的分頁。設計原則跟 post_draft_batch.py 的 CLI 一樣:
+#
+#   1. 判定不在這裡寫。能不能送一律問 post_draft_batch.evaluate()，介面只負責
+#      把結果畫出來 —— 兩套規則遲早會不一致，而不一致的方向可能是「畫面說擋、
+#      其實送出去了」。
+#   2. 勾選 = 寫審核表「陳會」欄。介面勾的跟 Excel 打的 OK 是同一件事，
+#      所以承辦人想用 Excel 或 CLI 也照樣通。
+#   3. 送出走 subprocess `post_draft_batch.py --go`，不在這支行程裡開 Selenium。
+#      實跑的是那支已經寫好安全關卡（逐筆失敗即中止、寫已陳核.txt 不重送）的程式。
+
+DEVTOOLS_LIST = "http://127.0.0.1:9222/json/list"
+
+
+def chrome_state():
+    """送陳核前的連線檢查。回 {"ok": bool, "說明": str or None}。
+
+    為什麼要在介面先擋:attach 不到 Chrome 時，畫面會吐一整片 chromedriver 的
+    英文堆疊，而 `fill_in_draft` 印的修補建議是「跑 `python main.py 3`」——
+    那是**結案存查**（歸檔完會自動貼校網、沒有人工關卡），跟送陳核完全無關，
+    照做會出事。那支是系管師的檔案不能改，所以改成不要讓人走到那一步。
+    2026-08-05 承辦人就是撞上這個:收文跑完把 Chrome 關掉，回來按送出。
+
+    只讀 DevTools 的分頁清單，不動任何東西。連不上就是沒開，很明確。
+    """
+    import urllib.request
+    try:
+        with urllib.request.urlopen(DEVTOOLS_LIST, timeout=1.5) as r:
+            tabs = json.load(r)
+    except Exception:
+        return {"ok": False,
+                "說明": "自動化用的 Chrome 沒有開著。請先按右上角「收新公文」把它開起來，"
+                        "而且跑完之後不要關掉那個 Chrome 視窗 —— 送陳核要接著用它。"}
+    urls = [t.get("url") or "" for t in tabs if t.get("type") == "page"]
+    if not any("edoc.gov.taipei" in u for u in urls):
+        return {"ok": False,
+                "說明": "Chrome 開著，但沒有停在公文系統。請把那個視窗切回 edoc 的"
+                        "「承辦中」清單頁再送。"}
+    # 殘留的「公文閱覽器」分頁會害送出流程誤判（它靠「有沒有多開一個分頁」判斷
+    # 公文開起來了沒），而且它同樣是 edoc 網域，光看網域檢查不出來。
+    # 2026-08-05 實測:一個開著的 7696 閱覽器分頁就讓整批停在第一筆。
+    viewers = [u for u in urls if "app=editor" in u]
+    if viewers:
+        return {"ok": False,
+                "說明": f"有 {len(viewers)} 個「公文閱覽器」分頁還開著。請先把它們關掉，"
+                        f"只留公文系統的主畫面 —— 程式靠「有沒有多開一個分頁」判斷"
+                        f"公文開起來了沒，已經開著的話會誤判成失敗而中止。"}
+    if not any("/tcqb/home/" in u for u in urls):
+        return {"ok": False,
+                "說明": "找不到公文系統的主畫面（左側有選單那個頁面）。"
+                        "請把 Chrome 切回去，或按「收新公文」重新登入。"}
+    return {"ok": True, "說明": None}
+
+
+def send_payload():
+    """陳核頁的清單。回 (dict, 提醒字串 or None)。
+
+    分三堆給畫面:
+      可送   —— 「陳會」已 OK 且判定過關。按送出就是送這幾筆。
+      擋下   —— 「陳會」已 OK 但判定不給送（退過文、他人業務、擬辦沒寫…）。
+      候選   —— 還沒 OK 的待辦。順手把「就算勾了也會被擋」先算出來標紅，
+                 免得承辦人勾完才發現送不了。
+    """
+    import post_draft_batch as pdb
+    note = None
+    try:
+        rs.sync()
+    except PermissionError:
+        note = "公告彙整.xlsx 正被 Excel 開著，勾選會存不進去（先關掉 Excel）"
+    except Exception as e:
+        note = f"同步時出錯:{type(e).__name__}: {e}"
+
+    flags = pdb.routing_flags()
+    ready, blocked, cand = [], [], []
+
+    def slim(it, extra=None):
+        out = {k: it.get(k) for k in
+               ("文號", "主旨", "送出文字", "移除的提示", "擋下原因")}
+        out["目錄"] = it.get("目錄") or ""
+        if extra:
+            out.update(extra)
+        return out
+
+    for r in rs.rows():
+        no = str(r["文號"]).strip()
+        d = _doc_dir(no)
+        # 辦完的、以及自己宣告「陳會已辦」的都不該再出現在這一頁。
+        if rs.is_archived(r, d) or rs.is_done(r.get("陳會")):
+            continue
+        it = pdb.evaluate(r, flags)
+        if rs.is_approved(r.get("陳會")):
+            (blocked if it.get("擋下原因") else ready).append(slim(it))
+        else:
+            cand.append(slim(it))
+    return {"可送": ready, "擋下": blocked, "候選": cand,
+            "chrome": chrome_state()}, note
+
+
 # ── 備料（呼叫 py main.py 4）────────────────────────────────────────────────
 #
 # 用 subprocess 跑，**完全不改系管師的程式碼** —— 呼叫不等於修改。
@@ -248,7 +349,7 @@ def detail_payload(doc_no):
 # 為什麼要背景跑:9 份公文大約 3～5 分鐘（每份下載 + 一次 LLM），
 # 瀏覽器的請求撐不了那麼久。
 
-def _launch_hud():
+def _launch_hud(job="prep", label=None):
     """開右下角的進度小浮窗（prep_hud.py）。
 
     為什麼需要:`main.py` 登入時會把 Chrome 最大化,整片蓋掉這個網頁,承辦人
@@ -263,43 +364,61 @@ def _launch_hud():
         w = os.path.join(os.path.dirname(exe), "pythonw.exe")
         if os.path.exists(w):
             exe = w
+        cmd = [exe, os.path.join(_BASE_DIR, "prep_hud.py"),
+               f"http://{HOST}:{PORT}", "0", f"--job={job}"]
+        if label:
+            cmd.append(f"--label={label}")
         subprocess.Popen(
-            [exe, os.path.join(_BASE_DIR, "prep_hud.py"),
-             f"http://{HOST}:{PORT}", "0"],
-            cwd=_BASE_DIR,
+            cmd, cwd=_BASE_DIR,
             creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
     except Exception as e:
-        print(f"[ui] 進度浮窗開不起來(不影響收文):{type(e).__name__}: {e}")
+        print(f"[ui] 進度浮窗開不起來(不影響工作):{type(e).__name__}: {e}")
 
 
-class Prep:
-    """同一時間只准跑一個。兩個 Selenium 搶同一個 Chrome 一定出事。"""
+class Job:
+    """跑一支外部程式，把它印的東西接給畫面。
 
-    def __init__(self):
+    **互斥是跨 Job 的，不是每個 Job 各一把鎖** —— 收新公文與送陳核都在操作
+    同一個 Chrome，兩個 Selenium 搶同一個瀏覽器一定出事。所以任一支在跑，
+    另一支就不准起來。
+    """
+
+    _lock = threading.Lock()
+    _busy = None                            # 目前占著 Chrome 的 Job
+
+    def __init__(self, name, argv, hud=None, hud_label=None):
+        self.name = name
+        self.argv = argv
+        self.hud = hud                      # 要開浮窗的話填 prep_hud 的 --job 值
+        self.hud_label = hud_label
         self.proc = None
         self.lines = []
         self.exit = None
-        self.lock = threading.Lock()
 
     @property
     def running(self):
         return self.proc is not None and self.proc.poll() is None
 
     def start(self):
-        with self.lock:
-            if self.running:
-                return False, "已經在跑了"
+        with Job._lock:
+            busy = Job._busy
+            if busy is not None and busy.running:
+                return False, ("已經在跑了" if busy is self else
+                               f"「{busy.name}」正在跑，等它結束再來"
+                               f"（兩件事會搶同一個 Chrome）")
             self.lines, self.exit = [], None
             try:
                 self.proc = subprocess.Popen(
-                    [sys.executable, "main.py", "4"], cwd=_BASE_DIR,
+                    [sys.executable, *self.argv], cwd=_BASE_DIR,
                     stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
                     encoding="utf-8", errors="replace", bufsize=1,
                     creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
             except Exception as e:
                 return False, f"啟動失敗:{type(e).__name__}: {e}"
+            Job._busy = self
         threading.Thread(target=self._pump, daemon=True).start()
-        _launch_hud()
+        if self.hud:
+            _launch_hud(self.hud, self.hud_label)
         return True, None
 
     def _pump(self):
@@ -325,7 +444,11 @@ class Prep:
                 "結束碼": self.exit}
 
 
-PREP = Prep()
+PREP = Job("收新公文", ["main.py", "4"], hud="prep")
+# 送陳核也開浮窗:這支同樣在操作 Chrome，Chrome 一到前景就把這個網頁蓋掉，
+# 而這是**會真的送出**的一段，看不到進度最讓人心慌（2026-08-03 收文那邊同因）。
+SEND = Job("送陳核", ["post_draft_batch.py", "--go"],
+           hud="send", hud_label="送陳核中…請不要動滑鼠")
 
 
 # ── HTTP ───────────────────────────────────────────────────────────────────
@@ -364,11 +487,21 @@ class Handler(BaseHTTPRequestHandler):
                 return self._json({"ok": False, "錯誤": f"{type(e).__name__}: {e}"})
         if path.startswith("/api/detail/"):
             return self._json({"ok": True, "detail": detail_payload(path.rsplit("/", 1)[-1])})
-        if path.startswith("/api/prep/status"):
+        if path in ("/api/prep/status", "/api/send/status"):
             from urllib.parse import parse_qs
             q = parse_qs(urlparse(self.path).query)
             since = int((q.get("since") or ["0"])[0])
-            return self._json({"ok": True, **PREP.status(since)})
+            job = SEND if path.startswith("/api/send") else PREP
+            return self._json({"ok": True, **job.status(since)})
+        if path == "/api/send/plan":
+            try:
+                data, note = send_payload()
+                return self._json({"ok": True, **data, "訊息": note})
+            except FileNotFoundError:
+                return self._json({"ok": False,
+                                   "錯誤": "還沒有任何公文。請先按「收新公文」。"})
+            except Exception as e:
+                return self._json({"ok": False, "錯誤": f"{type(e).__name__}: {e}"})
         if path == "/api/open":
             return self._json({"ok": False, "錯誤": "缺少參數"})
         self._send(404, "not found", "text/plain; charset=utf-8")
@@ -405,6 +538,42 @@ class Handler(BaseHTTPRequestHandler):
 
         if path == "/api/prep/stop":
             ok, err = PREP.stop()
+            return self._json({"ok": ok, "錯誤": err} if not ok else {"ok": True})
+
+        if path == "/api/send/start":
+            # 送陳核收不回來。這裡是唯一會真送的入口，兩道關卡:
+            #
+            #  1. 畫面要明確帶「確認」。少了它一律不動 —— 誰不小心 POST 到這個
+            #     位址（重整、書籤、寫錯的程式）都不會送出東西。
+            #  2. **畫面看到的那幾筆，要跟現在算出來的完全一樣**。中間有人動了
+            #     Excel、或多收了幾份公文，清單就變了；那不是承辦人按下確定時
+            #     看到的東西，寧可退回去讓他重看一次。
+            if not body.get("確認"):
+                return self._json({"ok": False, "錯誤": "缺少確認"}, 400)
+            seen = [str(x).strip() for x in (body.get("文號") or [])]
+            if not seen:
+                return self._json({"ok": False, "錯誤": "沒有要送的公文"})
+            # Chrome 沒開就別跑了 —— 跑下去只會吐一片英文堆疊，還附一個
+            # 「跑 main.py 3」的危險建議（見 chrome_state 的說明）。
+            cs = chrome_state()
+            if not cs["ok"]:
+                return self._json({"ok": False, "錯誤": cs["說明"]})
+            try:
+                import post_draft_batch as pdb
+                now = [it["文號"] for it in pdb.plan()[0]]
+            except Exception as e:
+                return self._json({"ok": False, "錯誤": f"{type(e).__name__}: {e}"})
+            if sorted(seen) != sorted(now):
+                return self._json({"ok": False,
+                                   "錯誤": f"清單變了（你看到 {len(seen)} 筆，現在是 "
+                                           f"{len(now)} 筆）—— 為安全起見沒有送出，"
+                                           f"請按「重新整理」再確認一次。"})
+            ok, err = SEND.start()
+            return self._json({"ok": ok, "錯誤": err} if not ok
+                              else {"ok": True, "筆數": len(now)})
+
+        if path == "/api/send/stop":
+            ok, err = SEND.stop()
             return self._json({"ok": ok, "錯誤": err} if not ok else {"ok": True})
 
         if path == "/api/attach":
