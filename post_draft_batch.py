@@ -310,8 +310,10 @@ def _list_has(driver, doc_no):
         return False
 
 
-def focus_list(driver, doc_no=None):
-    """把焦點切到「承辦中」清單 frame。給了 doc_no 就要那一筆真的在畫面上。
+def focus_list(driver, doc_no=None, label="承辦中"):
+    """把焦點切到 `label` 的清單 frame。給了 doc_no 就要那一筆真的在畫面上。
+
+    `label` 預設「承辦中」（送陳核用）；存查那條路傳「待結案」。
 
     **光看「有沒有公文文號表頭」不夠**:待結案清單、搜尋結果、催辦清單都有那個
     表頭。2026-08-06 實測 —— sidebar 明明寫「承辦中(5)」，frame 裡卻是只有 1 筆
@@ -330,16 +332,16 @@ def focus_list(driver, doc_no=None):
             and _list_has(driver, doc_no):
         return True
 
-    print("      畫面上的清單裡沒有這一筆 — 點左側「承辦中」重叫完整清單")
+    print(f"      畫面上的清單裡沒有這一筆 — 點左側「{label}」重叫完整清單")
     driver.switch_to.default_content()
-    if not click_sidebar(driver, "承辦中"):
+    if not click_sidebar(driver, label):
         return False
     time.sleep(2.0)
     if not _switch_to_frame_with_xpath(driver, _LIST_XPATH, "公文文號表頭", timeout=10):
         return False
     if not _list_has(driver, doc_no):
-        print(f"      x  「承辦中」清單裡找不到 {doc_no} —— 這份可能已經送走，"
-              f"或已經不在承辦中（例如陳核完回來等存查）")
+        print(f"      x  「{label}」清單裡找不到 {doc_no} —— 這份可能已經送走，"
+              f"或已經不在{label}（例如陳核完回來等存查）")
         return False
     return True
 
