@@ -1394,6 +1394,16 @@ def process_document_prep(driver):
     except Exception as e:
         print(f"[prep] 殘留目錄清理略過:{type(e).__name__}: {e}")
 
+    # 讀不到 / 點不到 sidebar 時的 fallback。**只用在這條 fork 的備料路徑**,
+    # 共用的 _get_sidebar_paren_count 與 _click_sidebar_item 一行都沒動 ——
+    # 那兩支是全自動路徑(pending_doc / main.py 1、2、3)也在用的。
+    # 為什麼需要:簽收催辦通知之後 edoc 會把「待辦公文」那組選單收起來,
+    # 收合是靠 height:0 + overflow:hidden,於是 Selenium 判定那些 <a> 不可見、
+    # element.text 回空字串 → 讀數失敗回 -1 → 底下 count > 0 不成立 → 什麼都
+    # 沒下載,畫面上看起來就是「簽收完就停了」(2026-08-05 實機查出,run.log 08:37)。
+    # 詳細原委與繞法見 edoc_sidebar.py 的模組說明。
+    from edoc_sidebar import click_sidebar, sidebar_count
+
     urgent_count = _get_urgent_message_count(driver)
     if urgent_count > 0:
         print(f"[prep] 催辦訊息 = {urgent_count},進催辦頁簽收...")
@@ -1401,12 +1411,23 @@ def process_document_prep(driver):
             time.sleep(2)
             _select_all_and_signoff(driver, urgent_count, "催辦通知")
 
+    # 讀數失敗 = 選單收合。這種狀態下**點擊也不能用原版**:_click_sidebar_item
+    # 最後一個 XPath 是 //*[contains(...)],會退到第一個「可見且含該字串」的元素
+    # ——收合時那是 <html>——點下去等於沒點卻回報 True,後面就在錯的頁面上空跑。
+    # 所以收合時讀與點都走 JS 版;沒收合則完全維持原本的行為,一步都不改。
     signoff_count = _get_pending_signoff_count(driver)
+    signoff_collapsed = signoff_count < 0
+    if signoff_collapsed:
+        signoff_count = sidebar_count(driver, "待簽收")
     if signoff_count > 0:
         print(f"[prep] 待簽收 = {signoff_count},進待簽收清單簽收...")
-        if _click_pending_signoff(driver):
+        clicked = (click_sidebar(driver, "待簽收") if signoff_collapsed
+                   else _click_pending_signoff(driver))
+        if clicked:
             time.sleep(2)
             _select_all_and_signoff(driver, signoff_count, "待簽收")
+        else:
+            print("[prep] 點「待簽收」失敗,跳過簽收。")
 
     # 承辦中 + 受會案件 各自備料(不碰待結案 — 結案存查是另一條全自動流程)
     for label in ("承辦中", "受會案件"):
@@ -1415,9 +1436,14 @@ def process_document_prep(driver):
         except Exception:
             pass
         count = _get_sidebar_paren_count(driver, label)
+        collapsed = count < 0
+        if collapsed:
+            count = sidebar_count(driver, label)
         print(f"[prep] sidebar {label} = {count}")
         if count > 0:
-            if _click_sidebar_item(driver, label):
+            clicked = (click_sidebar(driver, label) if collapsed
+                       else _click_sidebar_item(driver, label))
+            if clicked:
                 time.sleep(0.5)
                 pending_doc_prep(driver, label=label)
             else:
