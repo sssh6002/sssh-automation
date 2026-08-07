@@ -255,6 +255,17 @@ _LIST_XPATH = "//th[contains(normalize-space(), '公文文號')]"
 # 公文閱覽器分頁的網址特徵。它是 edoc 網域,但沒有 sidebar、沒有清單 frame。
 _VIEWER_MARK = "app=editor"
 
+# 登出／回到登入頁的網址特徵。2026-08-06:閒置一陣子後 Chrome 只剩
+# `index.jsp?logout=Y` 一個分頁,這時說「找不到公文系統主畫面」太含糊 ——
+# 講「已經登出」才知道下一步是重新登入。
+_LOGOUT_MARKS = ("logout=y", "/tcqb/index.jsp")
+
+
+def looks_logged_out(urls):
+    """從分頁網址判斷 edoc 是不是已經登出。"""
+    low = [str(u or "").lower() for u in urls]
+    return bool(low) and any(any(m in u for m in _LOGOUT_MARKS) for u in low)
+
 
 def viewer_tabs(driver):
     """回目前開著的公文閱覽器分頁 handle list。**會切換分頁焦點**。

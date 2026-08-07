@@ -277,6 +277,11 @@ def chrome_state():
                 "說明": "自動化用的 Chrome 沒有開著。請先按右上角「收新公文」把它開起來，"
                         "而且跑完之後不要關掉那個 Chrome 視窗 —— 送陳核要接著用它。"}
     urls = [t.get("url") or "" for t in tabs if t.get("type") == "page"]
+    import post_draft_batch as pdb
+    if pdb.looks_logged_out(urls) and not any("/tcqb/home/" in u for u in urls):
+        return {"ok": False,
+                "說明": "edoc 已經登出了（閒置太久，或按過登出）。請按右上角"
+                        "「收新公文」重新登入，跑完不要關掉那個 Chrome 視窗。"}
     if not any("edoc.gov.taipei" in u for u in urls):
         return {"ok": False,
                 "說明": "Chrome 開著，但沒有停在公文系統。請把那個視窗切回 edoc 的"

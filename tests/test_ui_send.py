@@ -143,6 +143,32 @@ def test_chrome_state_reports_not_running(monkeypatch):
     assert "收新公文" in s["說明"]
 
 
+def test_chrome_state_detects_logout(monkeypatch):
+    """只剩登入頁時要說「已經登出」，不是含糊的「找不到主畫面」。
+
+    2026-08-06:閒置一陣子後 Chrome 只剩 index.jsp?logout=Y 一個分頁。
+    """
+    import urllib.request as ur
+
+    class _Resp:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+        def read(self):
+            return json.dumps([
+                {"type": "page",
+                 "url": "https://edoc.gov.taipei/tcqb/index.jsp?logout=Y"}]
+            ).encode()
+
+    monkeypatch.setattr(ur, "urlopen", lambda *a, **k: _Resp())
+    s = ui.chrome_state()
+    assert s["ok"] is False
+    assert "登出" in s["說明"]
+
+
 def test_start_blocked_when_chrome_down(env, srv, monkeypatch):
     """Chrome 沒開就不要起 subprocess —— 跑下去只會吐英文堆疊，
     而且 fill_in_draft 會建議「跑 main.py 3」（結案存查，會貼校網）。"""

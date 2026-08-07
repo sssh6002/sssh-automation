@@ -152,10 +152,21 @@ def preview(doc_nos):
 
 def pending_doc_nos(driver):
     """讀 edoc「待結案」清單上的文號。回 list（讀不到回空）。"""
-    from post_draft_batch import focus_list, focus_main_window
+    from post_draft_batch import focus_list, focus_main_window, looks_logged_out
 
     if not focus_main_window(driver):
-        print("[archive_batch] 找不到公文系統主畫面")
+        urls = []
+        for h in list(driver.window_handles):
+            try:
+                driver.switch_to.window(h)
+                urls.append(driver.current_url or "")
+            except Exception:
+                continue
+        if looks_logged_out(urls):
+            print("[archive_batch] edoc 已經登出了（閒置太久或按過登出）——"
+                  "請在介面按「收新公文」重新登入，跑完不要關掉那個 Chrome 視窗。")
+        else:
+            print("[archive_batch] 找不到公文系統主畫面（有左側選單那個分頁）")
         return []
     if not focus_list(driver, label=GATE_LABEL):
         print("[archive_batch] 切不到「待結案」清單")
