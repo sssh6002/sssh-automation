@@ -120,11 +120,22 @@
   button.risk{background:var(--bad);border-color:var(--bad);color:#fff}
   button.risk:hover{background:#8e2727}
   button.risk:disabled{background:#d9b4b4;border-color:#d9b4b4}
+  /* ── 存查頁 ───────────────────────────────────────────────────────────
+     跟陳核頁最大的差別:**順序是資訊**。歸檔迴圈只做待結案清單的第一筆，
+     前面卡住後面就輪不到，所以清單一定照 edoc 的順序排、每筆掛序號，
+     而「輪不到」的那幾筆要看得出來是被前面拖累的，不是自己有問題。 */
+  .pill.bad{background:#fcebeb;color:var(--bad)}
+  .si.dim{opacity:.55}
+  .si.stop{border-color:var(--bad);background:#fdf6f6;border-width:2px}
+  .sh .idx{font-size:12px;color:var(--sub);min-width:20px;text-align:right}
+  .cut{display:flex;align-items:center;gap:10px;margin:10px 0;color:var(--bad);
+       font-size:13px;font-weight:700}
+  .cut::before,.cut::after{content:"";flex:1;border-top:2px dashed #eec9c9}
 </style>
 
 <div class="tabs">
   <div class="on" id="tablive">摘要</div><div class="click" id="tabsend">陳核</div>
-  <div class="soon">存查</div>
+  <div class="click" id="tabarch">存查</div>
   <div class="soon">公告</div><div class="soon">張貼</div><div class="click" id="tabold">舊文</div>
   <div class="soon">設定</div>
 </div>
@@ -139,6 +150,7 @@
        最下面，畫面上唯一看得到的按鈕是每筆的「不送了」,他下意識以為那顆就是
        「送去陳核」—— 在送出收不回來的頁面上，主動作不能藏在視線外。 -->
   <button id="dosendtop" class="risk" hidden></button>
+  <button id="doarchtop" class="risk" hidden></button>
   <button id="reload">重新整理</button>
 </div>
 
@@ -182,6 +194,23 @@
     <div class="dlgfoot">
       <button id="sendno">再想想</button>
       <button id="sendyes" class="risk">確定送出</button>
+    </div>
+  </div>
+</div>
+
+<div id="archask" class="mask" hidden>
+  <div class="dlg wide">
+    <h2>確定要把這些公文歸檔嗎？</h2>
+    <p class="danger"><b>歸檔之後，沒有 admin 介入就救不回來。</b>
+      下面每一筆會被歸到框起來的那個檔號、用你的自然人憑證簽章。
+      檔號歸錯要找 admin 才能改，請最後看一次。</p>
+    <div id="architems"></div>
+    <p class="warnbox">過程中會操作 Chrome，<b>請不要動滑鼠鍵盤</b>。憑證要插著、螢幕不能鎖。
+      任何一筆出錯會整批停下來，已歸檔的不會重做。</p>
+    <p class="mut">這一段<b>不會貼校網</b>。要公告的走「張貼」那一頁逐筆確認。</p>
+    <div class="dlgfoot">
+      <button id="archno">再想想</button>
+      <button id="archyes" class="risk">確定歸檔</button>
     </div>
   </div>
 </div>
@@ -241,22 +270,26 @@ function drawList() {
     n.onclick = () => pick(view()[+n.dataset.i]));
 }
 
-const TITLE = { live: "摘要", old: "舊文", send: "陳核" };
+const TITLE = { live: "摘要", old: "舊文", send: "陳核", arch: "存查" };
+// 整批處理的分頁（陳核／存查）看的是「整批會怎樣」而不是單筆,所以收掉左邊
+// 清單、右邊佔滿。
+const BATCH = (t) => t === "send" || t === "arch";
 
 function setTab(t) {
   TAB = t;
-  ["live", "old", "send"].forEach(k =>
+  ["live", "old", "send", "arch"].forEach(k =>
     el("tab" + k).className = t === k ? "on" : "click");
   el("title").textContent = TITLE[t];
   // 換頁等於換清單,原本選的那筆多半不在新清單裡,右邊一併清掉免得對不上。
   CUR = null;
   el("count").textContent = "";
-  // 陳核頁要看的是「整批會送什麼」,不是單筆 —— 收掉左邊清單、右邊佔滿。
-  el("list").hidden = t === "send";
-  document.querySelector(".wrap").classList.toggle("full", t === "send");
-  // 送出鈕只在陳核頁出現 —— 留在別的分頁上是誤觸來源。
+  el("list").hidden = BATCH(t);
+  document.querySelector(".wrap").classList.toggle("full", BATCH(t));
+  // 動作鈕只在自己那一頁出現 —— 留在別的分頁上是誤觸來源，而這兩顆都收不回來。
   el("dosendtop").hidden = true;
+  el("doarchtop").hidden = true;
   if (t === "send") return loadSend();
+  if (t === "arch") return loadArch();
   el("detail").innerHTML = '<div class="empty">左邊點一筆公文。</div>';
   drawList();
 }
@@ -264,6 +297,7 @@ function setTab(t) {
 el("tablive").onclick = () => setTab("live");
 el("tabold").onclick = () => setTab("old");
 el("tabsend").onclick = () => setTab("send");
+el("tabarch").onclick = () => setTab("arch");
 
 const KB = (n) => n >= 1048576 ? (n / 1048576).toFixed(1) + " MB"
                  : n >= 1024 ? Math.round(n / 1024) + " KB" : n + " B";
@@ -544,7 +578,169 @@ el("sendyes").onclick = async () => {
   watch("send");
 };
 
-// ── 背景工作:收新公文 / 送陳核 ───────────────────────────────────────────
+// ── 存查頁 ────────────────────────────────────────────────────────────────
+//
+// 這一頁**會真的歸檔，而且無 admin 介入無法復原**。跟陳核頁兩個差別:
+//
+// 1. **清單要去 edoc 讀**。「待結案有哪幾筆」磁碟上推不出來，只存在 edoc 上，
+//    所以先按「讀待結案清單」（程式會點左側「待結案」把清單叫出來，只切頁面、
+//    不歸檔），讀完才有東西可以確認。
+// 2. **順序是資訊，不只是排版**。歸檔迴圈永遠處理清單第一筆，成功才進下一輪；
+//    任何一筆過不了就整批中止。所以這裡不能像陳核頁那樣分「會做／不會做」兩堆
+//    了事 —— 被擋那筆後面的公文不是「自己有問題」，是**這批輪不到它們**，
+//    要看得出來差別，不然承辦人會去查一份根本沒問題的公文。
+//
+// 判定一樣不在這裡寫,一律吃 archive_batch.plan() 算好的「狀態」欄。
+let ARCH = null;
+
+async function loadArch() {
+  say("讀取中…");
+  el("detail").innerHTML = '<div class="empty">讀取中…</div>';
+  try {
+    const j = await (await fetch("/api/archive/plan")).json();
+    if (!j.ok) {
+      el("detail").innerHTML = "";
+      el("doarchtop").hidden = true;
+      return say(j.錯誤, "err");
+    }
+    ARCH = j;
+    drawArch();
+    say("");
+  } catch (e) { say("連不上程式，是不是關掉了？", "err"); }
+}
+
+const ARCHTAG = {
+  go:     ['<span class="pill ok">會歸檔</span>', "go"],
+  stop:   ['<span class="pill bad">停在這裡</span>', "stop"],
+  after:  ['<span class="pill done">這批輪不到</span>', "dim"],
+  danger: ['<span class="pill bad">要人工確認</span>', "no"],
+};
+
+// kind:"" 一般列／"ask" 對話框裡最後核對用（只留真的會歸檔的那幾筆）
+function archItem(it, i, kind) {
+  const [tag, cls] = ARCHTAG[it.狀態] || ["", ""];
+  const body = it.狀態 === "go"
+    // 實際會寫進 edoc 存查表單的就是這個 8 位檔號 —— 承辦人要核對的是它，
+    // 所以框起來、用等寬字，跟旁邊的說明文字明顯分開。
+    ? `<div class="stxt">分類「${esc(it.分類)}」　→　檔號 ${esc(it.檔號)}</div>` +
+      `<p class="mut">檔號來源:${esc(it.來源)}</p>`
+    : it.擋下原因
+      ? `<p class="why">✖ ${esc(it.擋下原因)}</p>`
+      : `<p class="mut">前面那筆會讓整批停下來，所以這次輪不到它。
+           它本身沒問題（分類「${esc(it.分類)}」→ 檔號 ${esc(it.檔號)}），
+           把前面那筆處理掉再跑一次就會做到。</p>`;
+  return `<div class="si ${cls}">
+    <div class="sh"><span class="idx">${i}.</span>
+      <span class="no">${esc(it.文號)}</span>${kind === "ask" ? "" : tag}
+      <span class="su">${esc(it.主旨) || "（讀不到主旨）"}</span></div>${body}</div>`;
+}
+
+function drawArch() {
+  const cr = ARCH.chrome || { ok: true };
+  const head = `<div class="danger">這一頁<b>會真的歸檔</b>：填檔號 → 按「確定存檔」→
+      憑證簽章，<b>歸檔之後沒有 admin 介入就救不回來</b>。
+      這一段<b>不會貼校網</b> —— 要公告的走「張貼」那一頁。</div>
+    ${cr.ok ? "" : `<div class="note"><b>⛔ 現在做不了：</b>${esc(cr.說明)}</div>`}`;
+
+  // 還沒讀過清單 —— 這一頁跟其他頁不一樣,打開不會自動算,因為「算」就是去點
+  // edoc 的選單。要讓人知道按下去會發生什麼，以及那件事是安全的。
+  if (!ARCH.掃過) {
+    el("count").textContent = "";
+    el("detail").innerHTML = head + `
+      <div class="box">
+        <p class="fld">先讀待結案清單 <span>還沒讀過</span></p>
+        <p>「待結案有哪幾筆」只存在 edoc 上，磁碟推不出來，所以要先去讀一次。</p>
+        <p class="mut">按下去程式只會點左側選單的「待結案」把清單叫出來、讀上面的
+          文號，<b>不會歸檔、不會送出任何東西</b>。要幾秒鐘。</p>
+        <div class="foot" style="margin-top:10px">
+          <button id="doscan" class="solid" ${cr.ok ? "" : "disabled"}>讀待結案清單</button>
+          <span class="mut">${cr.ok ? "" : "Chrome 沒接上（原因見上面）。"}</span>
+        </div>
+      </div>`;
+    const b = el("doscan");
+    if (b) b.onclick = startScan;
+    return;
+  }
+
+  const p = ARCH.計畫 || { 清單: [], 會歸檔: [], 可跑: false };
+  const items = p.清單 || [], go = p.會歸檔 || [];
+  el("count").textContent = `會歸檔 ${go.length} 筆`;
+  const warns = (p.警告 || []).map(w => `<div class="note">⚠️ ${esc(w)}</div>`).join("");
+
+  // 停止點畫一條斷線 —— 「到這裡為止」比每筆各自掛標籤好讀，而這正是這一頁
+  // 最容易被誤讀的地方。
+  let rows = "", cut = false;
+  items.forEach((it, i) => {
+    if (!cut && (it.狀態 === "stop" || it.狀態 === "after")) {
+      cut = true;
+      rows += `<div class="cut">以下這批做不到</div>`;
+    }
+    rows += archItem(it, i + 1, "");
+  });
+
+  el("detail").innerHTML = head + warns + `
+    <div class="box">
+      <p class="fld">待結案清單 <span>${items.length} 筆 ·
+        歸檔從第 1 筆開始逐筆往下，遇到過不了的就整批停在那裡</span></p>
+      ${rows || (warns
+        ? '<div class="mut">沒讀到任何公文 —— 先看上面那則說明，那不一定代表沒有待結案公文。</div>'
+        : '<div class="mut">待結案清單是空的 —— 沒有要存查的公文。</div>')}
+    </div>
+    <div class="note">主管還沒核決「如擬」的公文<b>這裡看不出來</b>（那是 edoc 上的
+      狀態，磁碟沒有痕跡）。真的跑下去遇到那種，它會被跳過、連兩輪之後整批停下 ——
+      不是壞掉，是那份公文還沒審完。</div>
+    <div class="sendbar">
+      <button id="doarch" class="big risk" ${
+        p.可跑 && cr.ok ? "" : "disabled"}>歸檔這 ${go.length} 筆</button>
+      <button id="rescan">重讀清單</button>
+      <span class="mut">${!cr.ok ? "Chrome 沒接上，現在做不了（原因見上面）。"
+        : p.可跑 ? "按下去會再問一次，並讓你看最後一遍每一筆要歸的檔號。"
+                 : esc(p.不可跑原因 || "沒有一筆做得到。")}</span>
+    </div>`;
+  el("doarch").onclick = askArch;
+  el("rescan").onclick = startScan;
+  // 上面那顆與底下那顆是同一個動作,狀態要一起走。
+  const top = el("doarchtop");
+  top.hidden = false;
+  top.textContent = `歸檔這 ${go.length} 筆`;
+  top.disabled = !(p.可跑 && cr.ok);
+  top.title = cr.ok ? (p.不可跑原因 || "會再問一次才真的歸檔") : (cr.說明 || "");
+  top.onclick = askArch;
+}
+
+async function startScan() {
+  const j = await (await fetch("/api/scan/start", { method: "POST" })).json();
+  if (!j.ok) return say(j.錯誤, "err");
+  watch("scan");
+}
+
+function askArch() {
+  const p = (ARCH && ARCH.計畫) || null;
+  if (!p || !p.可跑) return;
+  // 對話框只列**真的會歸檔**的那幾筆。輪不到的擺進來只會讓人以為那些也要動。
+  el("architems").innerHTML = (p.清單 || [])
+    .filter(it => it.狀態 === "go")
+    .map((it, i) => archItem(it, i + 1, "ask")).join("");
+  show("archask", true);
+}
+
+el("archno").onclick = () => show("archask", false);
+
+el("archyes").onclick = async () => {
+  show("archask", false);
+  const p = (ARCH && ARCH.計畫) || { 清單: [] };
+  const j = await (await fetch("/api/archive/start", {
+    method: "POST",
+    // 送**整份清單且照順序** —— 不是只送會歸檔的那幾筆。順序決定會做到哪裡，
+    // 中間有公文陳核完回到待結案就整個不一樣了，後端跟真正動手的那支都會比對。
+    body: JSON.stringify({ 確認: true, 文號: (p.清單 || []).map(it => it.文號) })
+  })).json();
+  if (!j.ok) return say(j.錯誤, "err");
+  say(`開始歸檔 ${j.筆數} 筆`);
+  watch("archive");
+};
+
+// ── 背景工作:收新公文 / 送陳核 / 讀清單 / 歸檔 ───────────────────────────
 // 兩件事共用同一個進度面板與輪詢 —— 都是操作同一個 Chrome、都只能等它跑完，
 // 介面沒有理由長成兩套。後端 Job 也互斥，同一時間只會有一支在跑。
 let JOB = "prep", seen = 0, poll = null;
@@ -552,6 +748,10 @@ const JOBTXT = {
   prep: { run: "收新公文中…請不要動滑鼠", ok: "收文完成", stop: "停止" },
   send: { run: "送陳核中…請不要動滑鼠", ok: "送出完成",
           stop: "中止（目前這筆可能停在一半）" },
+  // 讀清單只是切頁面,沒有做到一半的問題,停止鈕就寫「停止」。
+  scan: { run: "讀待結案清單中…請不要動滑鼠", ok: "清單讀好了", stop: "停止" },
+  archive: { run: "存查歸檔中…請不要動滑鼠", ok: "歸檔結束",
+             stop: "中止（目前這筆可能停在一半）" },
 };
 
 const show = (id, on) => el(id).hidden = !on;
@@ -566,9 +766,13 @@ function watch(job) {
   show("preppanel", true);
   show("prepstop", true);
   el("prep").disabled = true;
-  const s = el("dosend");
-  if (s) s.disabled = true;
-  el("dosendtop").disabled = true;      // 跑的時候兩顆都要按不下去
+  // 跑的時候所有會動 Chrome 的鈕都要按不下去（後端也互斥，這裡是不要讓人白按）。
+  ["dosend", "doarch", "doscan", "rescan"].forEach(id => {
+    const b = el(id);
+    if (b) b.disabled = true;
+  });
+  el("dosendtop").disabled = true;
+  el("doarchtop").disabled = true;
   clearInterval(poll);
   poll = setInterval(tick, 900);
   tick();
@@ -598,7 +802,10 @@ async function tick() {
   catch (e) { return; }
   if (j.訊息 && j.訊息.length) {
     const box = el("preplog");
-    box.textContent += j.訊息.join("\n") + "\n";
+    // 讀清單那支會印一行給程式看的 JSON（##PLAN# 開頭）—— 那是資料不是訊息，
+    // 塞進面板只會是一長條亂碼。seen 照樣要往前走，不然會一直重收。
+    const lines = j.訊息.filter(s => !s.startsWith("##PLAN#"));
+    if (lines.length) box.textContent += lines.join("\n") + "\n";
     box.scrollTop = box.scrollHeight;
     seen = j.總行數;
   }
@@ -610,7 +817,11 @@ async function tick() {
     const txt = JOBTXT[JOB];
     el("prepstate").textContent = good ? txt.ok : "已結束（有中斷或錯誤，請看上面訊息）";
     // 跑完清單一定變了（收文多幾筆／送出的那幾筆有了已陳核.txt），重讀。
-    if (TAB === "send") await loadSend(); else await load();
+    // 存查那邊尤其要重讀:歸檔一跑，後端就把上次讀到的待結案清單作廢了，
+    // 免得有人拿過期的清單再按一次。
+    if (TAB === "arch") await loadArch();
+    else if (TAB === "send") await loadSend();
+    else await load();
     if (good) {
       // 成功就自己收起來 —— 面板一直開著，使用者不知道到底跑完了沒。
       // 失敗則留著，錯誤訊息要看得到。
@@ -621,11 +832,14 @@ async function tick() {
   }
 }
 
-el("reload").onclick = () => TAB === "send" ? loadSend() : load();
+// 存查頁的「重新整理」只重讀後端已經有的那份清單,**不會**再去點 edoc ——
+// 要重讀 edoc 得按頁面裡的「重讀清單」。誤觸重新整理不該去動瀏覽器。
+el("reload").onclick = () => TAB === "arch" ? loadArch()
+  : TAB === "send" ? loadSend() : load();
 load();
-// 萬一頁面重整時工作還在跑,接回去繼續看。兩支都要問 —— 重整那一刻正在跑的
-// 可能是送陳核，接錯支就會盯著一個沒在動的面板。
-["prep", "send"].forEach(job =>
+// 萬一頁面重整時工作還在跑,接回去繼續看。四支都要問 —— 重整那一刻正在跑的
+// 可能是送陳核或歸檔，接錯支就會盯著一個沒在動的面板。
+["prep", "send", "scan", "archive"].forEach(job =>
   fetch(`/api/${job}/status?since=0`).then(r => r.json())
     .then(j => { if (j.執行中) watch(job); }).catch(() => {}));
 </script>

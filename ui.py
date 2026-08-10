@@ -16,6 +16,10 @@ ui.py
   **陳核頁**  ⚠️ 這一頁**會真的送出**（呼叫 post_draft_batch.py --go）。
               送陳核收不回來，所以介面照 CLI 的設計走兩段:先看清單、再按送出。
               判定完全交給 post_draft_batch.evaluate()，介面不另立標準。
+  **存查頁**  ⚠️ 這一頁**會真的歸檔**（呼叫 archive_batch.py --go），
+              而歸檔無 admin 介入無法復原。同樣兩段，且清單要先去 edoc 讀
+              （待結案清單只存在 edoc 上，磁碟推不出來），所以多一顆
+              「讀待結案清單」。判定交給 archive_batch.plan()。
 """
 
 import json
@@ -289,12 +293,17 @@ def chrome_state():
     # 殘留的「公文閱覽器」分頁會害送出流程誤判（它靠「有沒有多開一個分頁」判斷
     # 公文開起來了沒），而且它同樣是 edoc 網域，光看網域檢查不出來。
     # 2026-08-05 實測:一個開著的 7696 閱覽器分頁就讓整批停在第一筆。
-    viewers = [u for u in urls if "app=editor" in u]
+    #
+    # ⚠️ 這裡原本寫死 `app=editor`（送陳核那種閱覽器），**存查那種是 `app=check`**，
+    # 於是 2026-08-10 存查第一次實跑時，8/6 送陳核留下的 7710 閱覽器分頁照樣過關，
+    # document_closure 切閱覽器時抓到它而不是剛點開的 7696 —— 在錯的公文上判「如擬」
+    # 並按下載。改吃 post_draft_batch 那個涵蓋三種的特徵，兩頁共用同一份定義。
+    viewers = [u for u in urls if pdb._VIEWER_MARK in u]
     if viewers:
         return {"ok": False,
                 "說明": f"有 {len(viewers)} 個「公文閱覽器」分頁還開著。請先把它們關掉，"
-                        f"只留公文系統的主畫面 —— 程式靠「有沒有多開一個分頁」判斷"
-                        f"公文開起來了沒，已經開著的話會誤判成失敗而中止。"}
+                        f"只留公文系統的主畫面 —— 程式靠分頁判斷公文開起來了沒，"
+                        f"已經開著的話會抓錯分頁（可能因此對到別份公文）而中止。"}
     if not any("/tcqb/home/" in u for u in urls):
         return {"ok": False,
                 "說明": "找不到公文系統的主畫面（左側有選單那個頁面）。"
@@ -344,6 +353,46 @@ def send_payload():
             cand.append(slim(it))
     return {"可送": ready, "擋下": blocked, "候選": cand,
             "chrome": chrome_state()}, note
+
+
+# ── 存查頁 ─────────────────────────────────────────────────────────────────
+#
+# 跟陳核頁差在**清單從哪裡來**。陳核的候選算得出來（審核表 ＋ 磁碟），存查的
+# 「待結案有哪幾筆」只存在 edoc 上，非得去讀不可 —— 而讀它要點左側選單，等於
+# 在操作 Chrome。所以這一頁不是打開就自動算，而是要按「讀待結案清單」，走
+# 跟收文／送陳核同一把互斥鎖（`SCAN` 這支 Job）。
+#
+# 判定一樣不在這裡寫:`archive_batch.py --json` 印一行 JSON，這裡只負責撈出來。
+# 兩套規則遲早分岔，而最壞的方向是「畫面說會停下、其實歸檔了」。
+
+def scan_plan():
+    """從 SCAN 那支印出來的東西裡撈計畫。沒跑過或撈不到回 None。
+
+    往回找而不是取最後一行 —— selenium／urllib3 隨時可能在 JSON 之後再吐東西。
+    """
+    import archive_batch as ab
+    for line in reversed(SCAN.lines):
+        if line.startswith(ab.PLAN_MARK):
+            try:
+                return json.loads(line[len(ab.PLAN_MARK):])
+            except json.JSONDecodeError:
+                return None
+    return None
+
+
+def archive_payload():
+    """存查頁要的東西。回 dict。
+
+    「掃過沒」與「掃出什麼」分開講 —— 沒掃過跟掃出來是空的，下一步完全不同
+    （前者要按讀清單，後者是真的沒有待結案公文）。
+    """
+    p = scan_plan()
+    return {
+        "chrome": chrome_state(),
+        "掃過": p is not None,
+        "掃描中": SCAN.running,
+        "計畫": p,
+    }
 
 
 # ── 備料（呼叫 py main.py 4）────────────────────────────────────────────────
@@ -454,6 +503,15 @@ PREP = Job("收新公文", ["main.py", "4"], hud="prep")
 # 而這是**會真的送出**的一段，看不到進度最讓人心慌（2026-08-03 收文那邊同因）。
 SEND = Job("送陳核", ["post_draft_batch.py", "--go"],
            hud="send", hud_label="送陳核中…請不要動滑鼠")
+# 讀待結案清單。**不歸檔**，但會點左側「待結案」把清單叫出來 —— 那是在操作
+# 同一個 Chrome，所以照樣要走互斥鎖（收文中按這顆會被擋下並說是誰在跑）。
+SCAN = Job("讀待結案清單", ["archive_batch.py", "--json"])
+# 真的歸檔。argv 每次按送出前重寫（要帶 --expect=<畫面上那幾筆>）。
+ARCH = Job("結案存查", ["archive_batch.py", "--go"],
+           hud="archive", hud_label="存查歸檔中…請不要動滑鼠")
+
+# 進度面板／停止鈕共用同一組路由。名字就是網址裡的那一段:/api/<名字>/status。
+JOBS = {"prep": PREP, "send": SEND, "scan": SCAN, "archive": ARCH}
 
 
 # ── HTTP ───────────────────────────────────────────────────────────────────
@@ -492,12 +550,13 @@ class Handler(BaseHTTPRequestHandler):
                 return self._json({"ok": False, "錯誤": f"{type(e).__name__}: {e}"})
         if path.startswith("/api/detail/"):
             return self._json({"ok": True, "detail": detail_payload(path.rsplit("/", 1)[-1])})
-        if path in ("/api/prep/status", "/api/send/status"):
+        parts = path.strip("/").split("/")
+        if len(parts) == 3 and parts[0] == "api" and parts[2] == "status" \
+                and parts[1] in JOBS:
             from urllib.parse import parse_qs
             q = parse_qs(urlparse(self.path).query)
             since = int((q.get("since") or ["0"])[0])
-            job = SEND if path.startswith("/api/send") else PREP
-            return self._json({"ok": True, **job.status(since)})
+            return self._json({"ok": True, **JOBS[parts[1]].status(since)})
         if path == "/api/send/plan":
             try:
                 data, note = send_payload()
@@ -505,6 +564,11 @@ class Handler(BaseHTTPRequestHandler):
             except FileNotFoundError:
                 return self._json({"ok": False,
                                    "錯誤": "還沒有任何公文。請先按「收新公文」。"})
+            except Exception as e:
+                return self._json({"ok": False, "錯誤": f"{type(e).__name__}: {e}"})
+        if path == "/api/archive/plan":
+            try:
+                return self._json({"ok": True, **archive_payload()})
             except Exception as e:
                 return self._json({"ok": False, "錯誤": f"{type(e).__name__}: {e}"})
         if path == "/api/open":
@@ -541,9 +605,7 @@ class Handler(BaseHTTPRequestHandler):
             ok, err = PREP.start()
             return self._json({"ok": ok, "錯誤": err} if not ok else {"ok": True})
 
-        if path == "/api/prep/stop":
-            ok, err = PREP.stop()
-            return self._json({"ok": ok, "錯誤": err} if not ok else {"ok": True})
+        # 停止鈕（/api/<工作>/stop）由下面那段泛用路由處理，四支共用一條。
 
         if path == "/api/send/start":
             # 送陳核收不回來。這裡是唯一會真送的入口，兩道關卡:
@@ -577,8 +639,60 @@ class Handler(BaseHTTPRequestHandler):
             return self._json({"ok": ok, "錯誤": err} if not ok
                               else {"ok": True, "筆數": len(now)})
 
-        if path == "/api/send/stop":
-            ok, err = SEND.stop()
+        if path == "/api/scan/start":
+            # 讀清單本身不歸檔，但會點左側「待結案」—— 是在操作 Chrome，
+            # 所以 Chrome 沒接上就別跑（不然只會吐一片英文堆疊）。
+            cs = chrome_state()
+            if not cs["ok"]:
+                return self._json({"ok": False, "錯誤": cs["說明"]})
+            ok, err = SCAN.start()
+            return self._json({"ok": ok, "錯誤": err} if not ok else {"ok": True})
+
+        if path == "/api/archive/start":
+            # 歸檔**無 admin 介入無法復原**。三道關卡，缺一不動:
+            #
+            #  1. 沒帶「確認」一律不動 —— 誰誤 POST 到這個位址都不會歸檔。
+            #  2. 畫面看到的整份清單（含順序）要跟剛才讀到的完全一樣。順序有意義:
+            #     歸檔只做第一筆，前面卡住後面就輪不到，順序一變「會做到哪裡」
+            #     就跟人看過的不是同一回事。
+            #  3. archive_batch 說這批不能跑（例如清單裡有已存查標記卻還在待結案
+            #     的公文）就不給按。
+            #
+            # 另外真正動手的那支還會**自己再讀一次 edoc 清單**跟 --expect 比對 ——
+            # 這裡的比對只擋得住畫面過期，擋不住這半秒內 edoc 那邊又變了。
+            if not body.get("確認"):
+                return self._json({"ok": False, "錯誤": "缺少確認"}, 400)
+            seen = [str(x).strip() for x in (body.get("文號") or [])]
+            if not seen:
+                return self._json({"ok": False, "錯誤": "沒有要歸檔的公文"})
+            cs = chrome_state()
+            if not cs["ok"]:
+                return self._json({"ok": False, "錯誤": cs["說明"]})
+            p = scan_plan()
+            if p is None:
+                return self._json({"ok": False,
+                                   "錯誤": "還沒讀過待結案清單 —— 請先按「讀待結案清單」。"})
+            now = [it["文號"] for it in p["清單"]]
+            if seen != now:
+                return self._json({"ok": False,
+                                   "錯誤": f"清單變了（你看到 {len(seen)} 筆，現在是 "
+                                           f"{len(now)} 筆，或順序不同）—— 為安全起見"
+                                           f"沒有歸檔，請重新讀一次清單再確認。"})
+            if not p["可跑"]:
+                return self._json({"ok": False, "錯誤": p["不可跑原因"]})
+            ARCH.argv = ["archive_batch.py", "--go", "--expect=" + ",".join(now)]
+            ok, err = ARCH.start()
+            if not ok:
+                return self._json({"ok": False, "錯誤": err})
+            # 跑完清單一定不一樣了。舊的留著會讓人拿過期的清單再按一次送出，
+            # 而下一道 --expect 雖然擋得住，但那時人已經按下去了。直接作廢。
+            SCAN.lines = []
+            return self._json({"ok": True, "筆數": len(p["會歸檔"])})
+
+        parts = path.strip("/").split("/")
+        if len(parts) == 3 and parts[0] == "api" and parts[2] == "stop" \
+                and parts[1] in JOBS:
+            ok, err = JOBS[parts[1]].stop()
             return self._json({"ok": ok, "錯誤": err} if not ok else {"ok": True})
 
         if path == "/api/attach":

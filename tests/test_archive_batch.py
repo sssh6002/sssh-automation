@@ -146,3 +146,73 @@ def test_preview_splits_ready_and_blocked(work):
     ready, blocked = ab.preview(["MWAA0001", "MWAA0002"])
     assert [i["文號"] for i in ready] == ["MWAA0001"]
     assert [i["文號"] for i in blocked] == ["MWAA0002"]
+
+
+# ── 順序:整批做到哪裡 ──────────────────────────────────────────────────────
+#
+# `process_document_closure` 每輪只處理待結案清單的第一筆，失敗就整批中止。
+# 所以「這一筆過不過得了」跟「這一批做不做得到它」是兩件事 —— 排在被擋那筆
+# 後面的公文，判定再乾淨這批也輪不到。
+
+def test_plan_stops_at_first_blocked(work):
+    _closure_doc(work, "MWAA0001", "#存查分類:研習 03750401\n")
+    _closure_doc(work, "MWAA0002", "#存查分類:待確認\n")          # 卡在這
+    _closure_doc(work, "MWAA0003", "#存查分類:資安 03750402\n")   # 自己沒問題
+    p = ab.plan(["MWAA0001", "MWAA0002", "MWAA0003"])
+    assert [it["狀態"] for it in p["清單"]] == ["go", "stop", "after"]
+    assert p["會歸檔"] == ["MWAA0001"]
+    assert p["可跑"] is True
+    # 輪不到的那筆不可以被講成「它有問題」—— 承辦人會跑去查一份好好的公文。
+    assert p["清單"][2].get("擋下原因") is None
+
+
+def test_plan_order_decides_how_much_gets_done(work):
+    """同一批公文，被擋那筆排在最前面就一筆都做不到。"""
+    _closure_doc(work, "MWAA0001", "#存查分類:研習 03750401\n")
+    _closure_doc(work, "MWAA0002", "#存查分類:待確認\n")
+    assert ab.plan(["MWAA0002", "MWAA0001"])["會歸檔"] == []
+    assert ab.plan(["MWAA0001", "MWAA0002"])["會歸檔"] == ["MWAA0001"]
+
+
+def test_plan_refuses_whole_batch_on_stale_archive_marker(work):
+    """已存查標記卻還在待結案清單 → 整批不跑。
+
+    `process_document_closure` **不看**那個標記檔，會把它當一般待結案公文再送
+    一次「確定存檔」簽章 —— 對同一份公文重複簽章正是 2026-07-16 事故。
+    這道閘門長在 fork 這側（系管師那支不改），所以只能整批擋。
+    """
+    d = _closure_doc(work, "MWAA0001", "#存查分類:研習 03750401\n")
+    (d / "MWAA0001已存查.txt").write_text("x", encoding="utf-8")
+    _closure_doc(work, "MWAA0002", "#存查分類:資安 03750402\n")
+    p = ab.plan(["MWAA0001", "MWAA0002"])
+    assert p["清單"][0]["狀態"] == "danger"
+    assert p["可跑"] is False
+    assert "MWAA0001" in p["不可跑原因"]
+    # 危險那筆不擋住後面的判定（它不是「停止點」）—— 但整批照樣不跑。
+    assert p["清單"][1]["狀態"] == "go"
+
+
+def test_plan_carries_subject(work):
+    """介面上要看得懂自己在核對哪一份公文，不能只有文號。"""
+    d = _closure_doc(work, "MWAA0001", "#存查分類:研習 03750401\n")
+    (d / "MWAA0001內容.txt").write_text("主旨：測試用的公文主旨。\n", encoding="utf-8")
+    assert ab.plan(["MWAA0001"])["清單"][0]["主旨"] == "測試用的公文主旨。"
+
+
+# ── --expect:動手前再比一次 ────────────────────────────────────────────────
+
+def test_expect_matches():
+    assert ab.expect_mismatch("A,B", ["A", "B"]) is None
+    assert ab.expect_mismatch(" A , B ", ["A", "B"]) is None
+
+
+def test_expect_rejects_different_order():
+    """順序不同就是不同 —— 會做到哪裡整個變了。"""
+    why = ab.expect_mismatch("A,B", ["B", "A"])
+    assert why and "不一樣" in why
+
+
+def test_expect_rejects_added_or_removed():
+    assert ab.expect_mismatch("A,B", ["A", "B", "C"])
+    assert ab.expect_mismatch("A,B", ["A"])
+    assert ab.expect_mismatch("A", [])

@@ -253,7 +253,16 @@ _LIST_XPATH = "//th[contains(normalize-space(), '公文文號')]"
 
 
 # 公文閱覽器分頁的網址特徵。它是 edoc 網域,但沒有 sidebar、沒有清單 frame。
-_VIEWER_MARK = "app=editor"
+# 公文閱覽器分頁的網址特徵。**不能只認 `app=editor`**（2026-08-10 實機踩到）:
+# 送陳核開的是 `app=editor`，結案存查開的是 `app=check`，按下載那步還會多一個
+# `app=genpages`。原本這裡寫死 editor，於是存查那條路開跑前的殘留分頁檢查
+# 形同虛設 —— 8/6 送陳核留下的 `app=check&doSno=1156007710` 分頁一路過關，
+# `document_closure` 切公文閱覽器時抓到它（**不是**剛點開的那一份 7696），
+# 在錯的公文上判「如擬」、按下載。認 `oa/index.html?app=` 三種都涵蓋。
+#
+# 放寬這個常數是安全的:另外兩個用到它的地方（wait_viewer／close_viewer）都
+# **同時**要求網址帶 `doSno=<這份公文>`，認得更寬也只會認到同一份。
+_VIEWER_MARK = "oa/index.html?app="
 
 # 登出／回到登入頁的網址特徵。2026-08-06:閒置一陣子後 Chrome 只剩
 # `index.jsp?logout=Y` 一個分頁,這時說「找不到公文系統主畫面」太含糊 ——

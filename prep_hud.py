@@ -7,8 +7,9 @@ prep_hud.py
     python prep_hud.py --job=send --label="送陳核中…請不要動滑鼠"
     python prep_hud.py --demo      拿假訊息看長相（不連 ui.py，調版面用）
 
-`--job` 決定看哪一支工作的進度:`prep`（收新公文，預設）或 `send`（送陳核）。
-兩者都是 Chrome 一到前景就把 ui.py 的網頁整片蓋掉，所以都需要這個浮窗。
+`--job` 決定看哪一支工作的進度:`prep`（收新公文，預設）、`send`（送陳核）
+或 `archive`（結案存查歸檔）。三者都是 Chrome 一到前景就把 ui.py 的網頁整片
+蓋掉，所以都需要這個浮窗。
 
 為什麼要這支:`main.py` 登入時會把 Chrome 最大化，整片蓋掉 ui.py 的網頁，
 所以那個 #preplog 進度面板雖然一直在收訊息，承辦人卻看不到（2026-08-03 回報:
@@ -92,6 +93,28 @@ SEND_DEMO_LINES = [
     "      OK 已送陳核，寫入標記 MWAA1156007710已陳核.txt",
 ]
 
+# 存查歸檔的假訊息（--job=archive --demo）。
+ARCHIVE_DEMO_LINES = [
+    "===== 開始歸檔（無 admin 介入無法復原）=====",
+    "預期會歸檔 2 筆:MWAA1156007629、MWAA1156007635",
+    "[document_closure] ═══ 第 1 輪(待結案剩 2 筆)═══",
+    "      OK:從 MWAA1156007629總結.claude.md 讀到 #存查分類 檔號 = 03750401",
+    "[document_closure] ✓ 已填入分類檔號「03750401」",
+    "      OK:pinCode 視窗已關閉(系統完成簽章)",
+    "[document_closure] ✓ 已完成存查(公文 MWAA1156007629 歸檔到檔號 03750401)",
+    "[archive_batch] 略過自動貼校網（這條路只歸檔）",
+]
+
+
+# 每支工作的兩句話。結束那句一律講「可以動滑鼠了」—— 承辦人真正要知道的是
+# 手能不能碰，不是工作叫什麼名字（2026-08-06 坑 #13）。
+RUN_LABEL = {"prep": "收新公文中…請不要動滑鼠",
+             "send": "送陳核中…請不要動滑鼠",
+             "archive": "存查歸檔中…請不要動滑鼠"}
+DONE_LABEL = {"prep": "✓ 收文完成 — 可以動滑鼠了",
+              "send": "✓ 送出完成 — 可以動滑鼠了",
+              "archive": "✓ 歸檔結束 — 可以動滑鼠了"}
+
 
 class Hud:
     def __init__(self, base, since=0, demo=False, job="prep", label=None):
@@ -101,11 +124,9 @@ class Hud:
         self.since = since
         self.demo = demo
         self.job = job
-        self.label = label or ("送陳核中…請不要動滑鼠" if job == "send"
-                               else "收新公文中…請不要動滑鼠")
+        self.label = label or RUN_LABEL.get(job, RUN_LABEL["prep"])
         # 結束時最重要的一句話是「可以動滑鼠了」,不是「完成」。
-        self.done_label = ("✓ 送出完成 — 可以動滑鼠了" if job == "send"
-                           else "✓ 收文完成 — 可以動滑鼠了")
+        self.done_label = DONE_LABEL.get(job, DONE_LABEL["prep"])
         self.beeped = False
         self.lines = []
         self.miss = 0           # 連續連不上的次數
@@ -180,7 +201,8 @@ class Hud:
         if self.demo:
             # 每秒吐一行假訊息,吐完切到「完成」狀態 —— 結束時長怎樣也要看得到,
             # 那才是最需要看清楚的一刻（可不可以動滑鼠就看那一行）。
-            lines = SEND_DEMO_LINES if self.job == "send" else DEMO_LINES
+            lines = {"send": SEND_DEMO_LINES,
+                     "archive": ARCHIVE_DEMO_LINES}.get(self.job, DEMO_LINES)
             if self.demo_n < len(lines):
                 self.lines.append(lines[self.demo_n])
                 self.demo_n += 1
@@ -248,7 +270,7 @@ def _parse_args(argv):
             job = a.split("=", 1)[1].strip() or "prep"
         elif a.startswith("--label="):
             label = a.split("=", 1)[1]
-    if job not in ("prep", "send"):
+    if job not in RUN_LABEL:
         job = "prep"                        # 不認識的就當收文,不要因此開不起來
     rest = [a for a in argv if not a.startswith("--")]
     base = (rest[0] if rest else DEFAULT_BASE).rstrip("/")
