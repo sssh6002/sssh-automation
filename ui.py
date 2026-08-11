@@ -20,6 +20,10 @@ ui.py
               而歸檔無 admin 介入無法復原。同樣兩段，且清單要先去 edoc 讀
               （待結案清單只存在 edoc 上，磁碟推不出來），所以多一顆
               「讀待結案清單」。判定交給 archive_batch.plan()。
+  **公告頁**  只產文案（呼叫 announce_doc.py），**不送出任何東西**、不碰 Chrome、
+              不用讀卡機。文案可以直接改，改完自動存回審核表「公告」欄。
+              唯一的破壞性動作是「重產」（會蓋掉你改過的字），所以那顆是逐筆、
+              而且要再確認一次。判定交給 announce_doc.plan()。
 """
 
 import json
@@ -282,7 +286,21 @@ def chrome_state():
                         "而且跑完之後不要關掉那個 Chrome 視窗 —— 送陳核要接著用它。"}
     urls = [t.get("url") or "" for t in tabs if t.get("type") == "page"]
     import post_draft_batch as pdb
-    if pdb.looks_logged_out(urls) and not any("/tcqb/home/" in u for u in urls):
+    # 「操作時間逾期」的警告視窗先講 —— 它是確診（其他訊號都只是推測），
+    # 而且下一步多一件事:那個小視窗要先關掉。
+    #
+    # ⚠️ 這道檢查一定要在下面兩道「有沒有主畫面」之前。它的網址是
+    # /tcqb/home/sessionTimeout.jsp，**含 /tcqb/home/** —— 2026-08-10 承辦人
+    # 收文時它一直跳，而那時這裡是用 `any("/tcqb/home/" in u ...)` 認主畫面，
+    # 被它冒充過去，chrome_state 對一個已經被踢出去的 Chrome 回 ok=True。
+    # 陳核頁與存查頁共用這盞燈，等於兩頁都亮綠燈讓人按下去。
+    if pdb.looks_timed_out(urls):
+        return {"ok": False,
+                "說明": "edoc 跳出「操作時間逾期，請您重新登入」—— 閒置太久被踢出來了"
+                        "（收文時每份公文要等 AI 寫摘要 1～2 分鐘，edoc 那邊就是在那時候"
+                        "閒置的）。請先關掉那個灰色的警告小視窗，再按右上角「收新公文」"
+                        "重新登入。"}
+    if pdb.looks_logged_out(urls) and not pdb.has_home(urls):
         return {"ok": False,
                 "說明": "edoc 已經登出了（閒置太久，或按過登出）。請按右上角"
                         "「收新公文」重新登入，跑完不要關掉那個 Chrome 視窗。"}
@@ -304,7 +322,9 @@ def chrome_state():
                 "說明": f"有 {len(viewers)} 個「公文閱覽器」分頁還開著。請先把它們關掉，"
                         f"只留公文系統的主畫面 —— 程式靠分頁判斷公文開起來了沒，"
                         f"已經開著的話會抓錯分頁（可能因此對到別份公文）而中止。"}
-    if not any("/tcqb/home/" in u for u in urls):
+    # 用 pdb.has_home 而不是自己比對 "/tcqb/home/" —— 那個路徑底下不是只有
+    # 主畫面（sessionTimeout.jsp 也在），定義只寫一份，兩邊不會分岔。
+    if not pdb.has_home(urls):
         return {"ok": False,
                 "說明": "找不到公文系統的主畫面（左側有選單那個頁面）。"
                         "請把 Chrome 切回去，或按「收新公文」重新登入。"}
@@ -330,7 +350,7 @@ def send_payload():
         note = f"同步時出錯:{type(e).__name__}: {e}"
 
     flags = pdb.routing_flags()
-    ready, blocked, cand = [], [], []
+    ready, blocked, cand, sent = [], [], [], []
 
     def slim(it, extra=None):
         out = {k: it.get(k) for k in
@@ -346,12 +366,22 @@ def send_payload():
         # 辦完的、以及自己宣告「陳會已辦」的都不該再出現在這一頁。
         if rs.is_archived(r, d) or rs.is_done(r.get("陳會")):
             continue
+        # 磁碟上有 *已陳核.txt = 陳核這一關做完了，下一站是存查，不該再佔這頁。
+        #
+        # 「陳會」欄這時可能還停在 OK ——「upsert 只填空白格」，承辦人當初打的
+        # OK（=請程式去送）在送完之後不會被改寫（交接檔坑 #1）。原本這種筆會
+        # 一直列在「勾了要送，但送不出去」，理由寫「已有 已陳核.txt，先前送過」，
+        # 佔滿畫面又要人一筆一筆取消勾選（2026-08-06 承辦人回報:「我取消勾選後
+        # 怎麼避免下次又選到」）。以磁碟痕跡為準直接跳過，不必他動手。
+        if d and pdb.already_sent(d, no):
+            sent.append(no)
+            continue
         it = pdb.evaluate(r, flags)
         if rs.is_approved(r.get("陳會")):
             (blocked if it.get("擋下原因") else ready).append(slim(it))
         else:
             cand.append(slim(it))
-    return {"可送": ready, "擋下": blocked, "候選": cand,
+    return {"可送": ready, "擋下": blocked, "候選": cand, "已送過": sent,
             "chrome": chrome_state()}, note
 
 
@@ -393,6 +423,80 @@ def archive_payload():
         "掃描中": SCAN.running,
         "計畫": p,
     }
+
+
+# ── 公告頁 ─────────────────────────────────────────────────────────────────
+#
+# 全站唯一**不會送出任何東西**的動作頁:只叫 LLM 產文案、寫進審核表「公告」欄。
+# 不用 Chrome、不用讀卡機、不碰 edoc。真的貼上校網是「張貼」那一頁的事 ——
+# 2026-07-28 出事的正是「歸檔完自動貼校網」，所以「這一步會不會送出去」
+# 必須在畫面上一眼看得出來，而不是靠人記得。
+#
+# 判定一樣不在這裡寫，一律吃 announce_doc.plan():
+#   會產     = plan(overwrite=False) 的 todo
+#   已有文案 = 公告欄有字的（能不能重產 = 它在不在 plan(overwrite=True) 的 todo 裡）
+#   不會產   = 其餘的 skip，附 plan() 給的原因原文
+# 「打過 OK 的定稿即使 overwrite 也不動」這條護欄（2026-07-28 把承辦人手寫的
+# 公告蓋掉三次）就長在 plan() 裡，介面照抄它的答案就自動有這道保護。
+
+def announce_payload(sent_only=True):
+    """公告頁的清單。回 (dict, 提醒字串 or None)。
+
+    sent_only 預設**開著**（CLI 預設是關的）:走到這一頁時公文多半已經陳核，
+    而還沒陳核的擬辦還可能被改，先產文案容易白做、白花 token。
+    這不是另立判定標準 —— 它就是 CLI 的 --sent-only，畫面上有勾選框可以關掉，
+    被它濾掉的公文會出現在「不會產」並寫明原因，不會默默消失。
+    """
+    import announce_doc as ad
+    note = None
+    try:
+        rs.sync()
+    except PermissionError:
+        note = "公告彙整.xlsx 正被 Excel 開著，產出的文案會存不進去（先關掉 Excel）"
+    except Exception as e:
+        note = f"同步時出錯:{type(e).__name__}: {e}"
+
+    sheet = {str(r["文號"]).strip(): r for r in rs.rows()}
+    todo, skip = ad.plan(overwrite=False, sent_only=sent_only)
+    # 再問一次「如果准覆寫，這幾筆做不做得到」—— 這就是每一筆的「可不可以重產」。
+    # 自己判「有沒有打 OK」會變成第二套標準，遲早跟 plan() 分岔。
+    ow_todo, ow_skip = ad.plan(overwrite=True, sent_only=sent_only)
+    can_redo = {it["文號"] for it in ow_todo}
+    ow_why = {it["文號"]: it["略過"] for it in ow_skip}
+
+    def archived(no):
+        """辦完的公文歸「舊文」，不佔這一頁 —— 跟陳核頁同一條規則。
+
+        這些公文在 plan() 裡本來就一定落在 skip（張貼已辦／不用公告／
+        公告欄已有內容），所以濾掉它們不會讓「畫面說不產、CLI 卻會產」。
+        """
+        return rs.is_archived(sheet.get(no) or {}, _doc_dir(no))
+
+    def base(it):
+        return {"文號": it["文號"], "主旨": it["主旨"],
+                "目錄": it.get("目錄") or ""}
+
+    ready = [base(it) for it in todo if not archived(it["文號"])]
+    have, other = [], []
+    for it in skip:
+        no = it["文號"]
+        if archived(no):
+            continue
+        text = str((sheet.get(no) or {}).get("公告") or "")
+        if text.strip():
+            have.append({
+                **base(it), "文案": text,
+                "可重產": no in can_redo,
+                "不可重產原因": ow_why.get(no) or "",
+                # 文案裡有「來文沒有的網址」—— announce_doc 標了但沒刪，
+                # 那是貼上校網前一定要人看的東西，不能只躺在文字裡。
+                "待查核": ad.STRAY_MARK in text,
+                "張貼": (sheet.get(no) or {}).get("張貼") or "",
+            })
+        else:
+            other.append({**base(it), "略過": it["略過"]})
+    return {"會產": ready, "已有文案": have, "不會產": other,
+            "只看已陳核": bool(sent_only)}, note
 
 
 # ── 備料（呼叫 py main.py 4）────────────────────────────────────────────────
@@ -498,7 +602,12 @@ class Job:
                 "結束碼": self.exit}
 
 
-PREP = Job("收新公文", ["main.py", "4"], hud="prep")
+# 收新公文走 fork 的 prep_batch.py，**不是** `main.py 4`。
+# 差別:prep_batch 先把公文全部下載完，再離線補摘要。原本那條是每下載一份就
+# 等 AI 寫 1～2.5 分鐘的摘要，edoc 在那段閒置到跳「操作時間逾期」，後面的公文
+# 就變成「切不到清單 frame,跳過」——而且結束碼 0，看起來像正常跑完（坑 #19）。
+# `main.py 4` 本身一行沒改，系管師照樣跑得動。
+PREP = Job("收新公文", ["prep_batch.py"], hud="prep")
 # 送陳核也開浮窗:這支同樣在操作 Chrome，Chrome 一到前景就把這個網頁蓋掉，
 # 而這是**會真的送出**的一段，看不到進度最讓人心慌（2026-08-03 收文那邊同因）。
 SEND = Job("送陳核", ["post_draft_batch.py", "--go"],
@@ -509,9 +618,16 @@ SCAN = Job("讀待結案清單", ["archive_batch.py", "--json"])
 # 真的歸檔。argv 每次按送出前重寫（要帶 --expect=<畫面上那幾筆>）。
 ARCH = Job("結案存查", ["archive_batch.py", "--go"],
            hud="archive", hud_label="存查歸檔中…請不要動滑鼠")
+# 產公告文案。**不碰 Chrome、不用讀卡機**，所以不開浮窗 —— 那顆浮窗的作用是
+# 「現在不能動滑鼠」，這一段可以動，開了反而是誤導（坑 #13 的反面）。
+# 但它照樣走同一把互斥鎖:跟收文一樣會寫桌面那份審核表，兩支同時 load→save
+# 同一個 xlsx 會互相蓋掉，先存的那邊直接消失。
+# argv 每次按下去前重寫（要帶 --only=<畫面上那幾筆>，**絕不用 --limit**）。
+ANNC = Job("產生公告文案", ["announce_doc.py"])
 
 # 進度面板／停止鈕共用同一組路由。名字就是網址裡的那一段:/api/<名字>/status。
-JOBS = {"prep": PREP, "send": SEND, "scan": SCAN, "archive": ARCH}
+JOBS = {"prep": PREP, "send": SEND, "scan": SCAN, "archive": ARCH,
+        "announce": ANNC}
 
 
 # ── HTTP ───────────────────────────────────────────────────────────────────
@@ -571,6 +687,18 @@ class Handler(BaseHTTPRequestHandler):
                 return self._json({"ok": True, **archive_payload()})
             except Exception as e:
                 return self._json({"ok": False, "錯誤": f"{type(e).__name__}: {e}"})
+        if path == "/api/announce/plan":
+            from urllib.parse import parse_qs
+            q = parse_qs(urlparse(self.path).query)
+            sent = (q.get("sent") or ["1"])[0] != "0"
+            try:
+                data, note = announce_payload(sent_only=sent)
+                return self._json({"ok": True, **data, "訊息": note})
+            except FileNotFoundError:
+                return self._json({"ok": False,
+                                   "錯誤": "還沒有任何公文。請先按「收新公文」。"})
+            except Exception as e:
+                return self._json({"ok": False, "錯誤": f"{type(e).__name__}: {e}"})
         if path == "/api/open":
             return self._json({"ok": False, "錯誤": "缺少參數"})
         self._send(404, "not found", "text/plain; charset=utf-8")
@@ -588,7 +716,10 @@ class Handler(BaseHTTPRequestHandler):
             if not doc_no:
                 return self._json({"ok": False, "錯誤": "缺少文號"}, 400)
             rec = {"文號": doc_no}
-            for col in ("擬辦", "陳會", "張貼"):
+            # 「公告」= 公告頁那個文案框。跟擬辦一樣可以直接改、停 1 秒自動存,
+            # 所以要允許覆寫（overwrite=True 見下面）—— 那是承辦人自己在打字,
+            # 不是程式擅自蓋。程式那條路（announce_doc）另有 plan() 的定稿護欄。
+            for col in ("擬辦", "陳會", "張貼", "公告"):
                 if col in body:
                     rec[col] = body[col]
             try:
@@ -688,6 +819,50 @@ class Handler(BaseHTTPRequestHandler):
             # 而下一道 --expect 雖然擋得住，但那時人已經按下去了。直接作廢。
             SCAN.lines = []
             return self._json({"ok": True, "筆數": len(p["會歸檔"])})
+
+        if path == "/api/announce/start":
+            # 這一頁**不會把任何東西送出去**，但會花 token、會寫審核表，
+            # 而「重產」會蓋掉承辦人自己改過的字。兩道關卡:
+            #
+            #  1. 沒帶「確認」一律不動 —— 誰誤 POST 到這個位址都不會花錢。
+            #  2. 要產的那幾筆，一律再問一次 announce_doc.plan()，**而且用的是
+            #     待會真的帶下去的同一組旗標**。plan() 不給的（打過 OK 的定稿、
+            #     含個資、擬辦不是要公告、還沒陳核…）就不放行，介面不另立標準。
+            #     少一筆就整批退回並說明原因，不會默默少產一份。
+            #
+            # 帶下去的是 --only <文號…>，**不是 --limit**:2026-07-28 就是
+            # `--overwrite --limit 1` 挑錯對象，把手寫的公告蓋掉三次。
+            if not body.get("確認"):
+                return self._json({"ok": False, "錯誤": "缺少確認"}, 400)
+            seen = [str(x).strip() for x in (body.get("文號") or [])]
+            if not seen:
+                return self._json({"ok": False, "錯誤": "沒有要產文案的公文"})
+            overwrite = bool(body.get("重產"))
+            sent_only = bool(body.get("只看已陳核"))
+            try:
+                import announce_doc as ad
+                todo, skip = ad.plan(overwrite=overwrite, only=seen,
+                                     sent_only=sent_only)
+            except FileNotFoundError:
+                return self._json({"ok": False,
+                                   "錯誤": "還沒有任何公文。請先按「收新公文」。"})
+            except Exception as e:
+                return self._json({"ok": False, "錯誤": f"{type(e).__name__}: {e}"})
+            now = [it["文號"] for it in todo]
+            if sorted(now) != sorted(seen):
+                why = "；".join(f"{it['文號']} — {it['略過']}" for it in skip[:3]) \
+                      or "在審核表裡找不到那幾筆"
+                return self._json({
+                    "ok": False,
+                    "錯誤": f"有 {len(seen) - len(now)} 筆現在不能產（{why}）"
+                            f"—— 什麼都沒做，請按「重新整理」再看一次。"})
+            ANNC.argv = (["announce_doc.py"]
+                         + (["--overwrite"] if overwrite else [])
+                         + (["--sent-only"] if sent_only else [])
+                         + ["--only", *now])
+            ok, err = ANNC.start()
+            return self._json({"ok": ok, "錯誤": err} if not ok
+                              else {"ok": True, "筆數": len(now)})
 
         parts = path.strip("/").split("/")
         if len(parts) == 3 and parts[0] == "api" and parts[2] == "stop" \

@@ -251,14 +251,21 @@ def test_status_route_covers_every_job(srv):
 
 
 def test_stop_route_covers_every_job(srv):
-    for job in ("prep", "send", "scan", "archive"):
+    # 照 JOBS 跑，不要另抄一份名單 —— 抄的那份加新工作時一定忘了改。
+    for job in ui.JOBS:
         r = _post(srv, f"/api/{job}/stop", {})
         assert r["ok"] is False and "沒有正在執行" in r["錯誤"]
 
 
 def test_jobs_share_one_lock():
-    """讀清單／歸檔跟收文、送陳核搶同一個 Chrome，四支互斥。"""
-    assert {ui.PREP, ui.SEND, ui.SCAN, ui.ARCH} == set(ui.JOBS.values())
+    """五支工作互斥,而且全部登記在 JOBS。
+
+    前四支是搶同一個 Chrome。產公告文案不碰 Chrome，但它跟收文一樣會寫桌面那份
+    審核表 —— 兩支同時 load→save 同一個 xlsx，先存的那邊直接消失。
+    沒登記在 JOBS 的話，/api/<工作>/status 與 /stop 兩條泛用路由就管不到它，
+    畫面上會看不到進度、也按不了停止。
+    """
+    assert {ui.PREP, ui.SEND, ui.SCAN, ui.ARCH, ui.ANNC} == set(ui.JOBS.values())
 
 
 # ── 浮窗 ───────────────────────────────────────────────────────────────────

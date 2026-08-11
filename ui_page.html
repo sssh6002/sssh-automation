@@ -131,12 +131,31 @@
   .cut{display:flex;align-items:center;gap:10px;margin:10px 0;color:var(--bad);
        font-size:13px;font-weight:700}
   .cut::before,.cut::after{content:"";flex:1;border-top:2px dashed #eec9c9}
+  /* ── 公告頁 ───────────────────────────────────────────────────────────
+     全站唯一**不會送出任何東西**的動作頁。所以這裡不用紅底警語 —— 紅底要留給
+     真的收不回來的動作，到處都是紅的等於沒有紅的。改用綠底講清楚「這一頁不會
+     貼上校網」:2026-07-28 那次意外之後，「這一步會不會送出去」要一眼看得出來。 */
+  .safe{background:#eef7f2;border:1px solid #bfdccf;border-radius:8px;
+        padding:10px 13px;font-size:13px;color:#1c5c44;margin:0 0 12px}
+  .safe b{color:var(--th)}
+  /* 公告文案是要給全校師生家長讀的散文,不是給人核對的欄位 —— 所以這個框
+     用正常字體、行距放寬(承辦人以「讀者讀不讀得下去」為準)，不套 .stxt 的等寬。 */
+  .atxt{line-height:1.9;min-height:130px}
+  .achk{display:flex;align-items:center;gap:6px;font-size:13px;color:var(--sub);
+        cursor:pointer}
+  .achk input{cursor:pointer}
+  details.skip{font-size:13px;border-top:1px solid #f0f2f1;padding:6px 0}
+  details.skip:first-of-type{border-top:0}
+  details.skip summary{cursor:pointer;color:#555}
+  details.skip b{color:var(--th)}
+  details.skip .li{color:var(--sub);font-size:12px;padding:2px 0 2px 18px}
 </style>
 
 <div class="tabs">
   <div class="on" id="tablive">摘要</div><div class="click" id="tabsend">陳核</div>
   <div class="click" id="tabarch">存查</div>
-  <div class="soon">公告</div><div class="soon">張貼</div><div class="click" id="tabold">舊文</div>
+  <div class="click" id="tabanc">公告</div>
+  <div class="soon">張貼</div><div class="click" id="tabold">舊文</div>
   <div class="soon">設定</div>
 </div>
 
@@ -215,6 +234,24 @@
   </div>
 </div>
 
+<!-- 重產是這一頁唯一會弄壞東西的動作:現在那篇（可能含承辦人自己改的字）會被
+     整篇換掉。所以它是逐筆、要再確認一次，而且對話框裡把「先複製起來」講出來 ——
+     2026-07-28 那次是 --overwrite --limit 1 蓋掉手寫公告三次，沒有任何確認。 -->
+<div id="ancask" class="mask" hidden>
+  <div class="dlg">
+    <h2>要重產這一筆的文案嗎？</h2>
+    <p class="danger"><b>現在這一篇會被整篇換掉。</b>
+      你自己改過的字會不見，而且救不回來 —— 要留的話，先按「取消」再按「複製全文」存起來。</p>
+    <p id="ancwho" class="mut"></p>
+    <p class="warnbox">重產會叫一次 AI（花 token），大約十幾秒。
+      <b>不會</b>把任何東西貼上校網，也不會動 edoc。</p>
+    <div class="dlgfoot">
+      <button id="ancno">取消</button>
+      <button id="ancyes" class="risk">確定重產</button>
+    </div>
+  </div>
+</div>
+
 <div class="wrap">
   <div class="list" id="list"></div>
   <div class="detail" id="detail"><div class="empty">左邊點一筆公文。</div></div>
@@ -270,14 +307,14 @@ function drawList() {
     n.onclick = () => pick(view()[+n.dataset.i]));
 }
 
-const TITLE = { live: "摘要", old: "舊文", send: "陳核", arch: "存查" };
-// 整批處理的分頁（陳核／存查）看的是「整批會怎樣」而不是單筆,所以收掉左邊
-// 清單、右邊佔滿。
-const BATCH = (t) => t === "send" || t === "arch";
+const TITLE = { live: "摘要", old: "舊文", send: "陳核", arch: "存查", anc: "公告" };
+// 整批處理的分頁（陳核／存查／公告）看的是「整批會怎樣」而不是單筆,所以收掉
+// 左邊清單、右邊佔滿。
+const BATCH = (t) => t === "send" || t === "arch" || t === "anc";
 
 function setTab(t) {
   TAB = t;
-  ["live", "old", "send", "arch"].forEach(k =>
+  ["live", "old", "send", "arch", "anc"].forEach(k =>
     el("tab" + k).className = t === k ? "on" : "click");
   el("title").textContent = TITLE[t];
   // 換頁等於換清單,原本選的那筆多半不在新清單裡,右邊一併清掉免得對不上。
@@ -290,6 +327,7 @@ function setTab(t) {
   el("doarchtop").hidden = true;
   if (t === "send") return loadSend();
   if (t === "arch") return loadArch();
+  if (t === "anc") return loadAnc();
   el("detail").innerHTML = '<div class="empty">左邊點一筆公文。</div>';
   drawList();
 }
@@ -298,6 +336,7 @@ el("tablive").onclick = () => setTab("live");
 el("tabold").onclick = () => setTab("old");
 el("tabsend").onclick = () => setTab("send");
 el("tabarch").onclick = () => setTab("arch");
+el("tabanc").onclick = () => setTab("anc");
 
 const KB = (n) => n >= 1048576 ? (n / 1048576).toFixed(1) + " MB"
                  : n >= 1024 ? Math.round(n / 1024) + " KB" : n + " B";
@@ -502,7 +541,7 @@ function sendItem(it, kind) {
 function drawSend() {
   const go = PLAN.可送 || [], stuck = PLAN.擋下 || [], cand = PLAN.候選 || [];
   // Chrome 沒開就先擋住 —— 讓人按下去才看到一片英文堆疊是最糟的。
-  const cr = PLAN.chrome || { ok: true };
+  const cr = PLAN.chrome || { ok: true }, sent = PLAN.已送過 || [];
   el("count").textContent = `會送 ${go.length} 筆`;
   const sec = (title, hint, items, kind, empty) => `
     <div class="box">
@@ -515,6 +554,8 @@ function drawSend() {
       <b>送出後收不回來</b>。開始前確認三件事：Chrome 開著且停在 edoc「承辦中」清單頁
       （沒開就先按右上角「收新公文」）、自然人憑證插著、螢幕不要鎖。</div>
     ${cr.ok ? "" : `<div class="note"><b>⛔ 現在送不出去：</b>${esc(cr.說明)}</div>`}
+    ${sent.length ? `<p class="mut" style="margin:0 0 12px">另有 ${sent.length}
+      筆已經送過陳核（正在等主管決行，下一站是存查），這頁不再列出。</p>` : ""}
     ${sec("會送出", `${go.length} 筆 · 下面框起來的就是實際填進 edoc 的字`, go, "go",
           "還沒有。到下面「其他待辦」按「要送」把公文加進來。")}
     ${stuck.length ? sec("你勾了要送，但送不出去",
@@ -740,7 +781,185 @@ el("archyes").onclick = async () => {
   watch("archive");
 };
 
-// ── 背景工作:收新公文 / 送陳核 / 讀清單 / 歸檔 ───────────────────────────
+// ── 公告頁 ────────────────────────────────────────────────────────────────
+//
+// 全站唯一**不會送出任何東西**的動作頁:只叫 AI 產文案、寫進審核表「公告」欄。
+// 不用 Chrome、不用讀卡機、不碰 edoc。所以這裡沒有紅底警語、沒有 Chrome 檢查、
+// 沒有「請不要動滑鼠」—— 那些話留給真的會出事的頁面，到處都寫等於沒寫。
+//
+// 兩件事還是要講明白:
+//   · 會花 token —— 按鈕直接寫「產生 N 筆」，讓人知道規模。
+//   · **重產會蓋掉現在那一篇**（含承辦人自己改過的字）。所以重產是逐筆、
+//     要再確認一次；批次那顆永遠只填空白的，不會蓋到任何現有文案。
+//
+// 能不能產**不在這裡判斷**，一律吃後端問 announce_doc.plan() 的結果。
+let ANC = null, ANCSENT = true, ANCREDO = null;
+
+async function loadAnc() {
+  say("讀取中…");
+  el("detail").innerHTML = '<div class="empty">讀取中…</div>';
+  try {
+    const j = await (await fetch("/api/announce/plan?sent=" + (ANCSENT ? 1 : 0))).json();
+    if (!j.ok) { el("detail").innerHTML = ""; return say(j.錯誤, "err"); }
+    ANC = j;
+    drawAnc();
+    say(j.訊息 || "", j.訊息 ? "err" : "");
+  } catch (e) { say("連不上程式，是不是關掉了？", "err"); }
+}
+
+// 還沒有文案的:一行一筆,附一顆「產這一筆」。
+function ancTodo(it) {
+  return `<div class="si">
+    <div class="sh"><span class="no">${esc(it.文號)}</span>
+      <span class="su">${esc(it.主旨)}</span>
+      <button data-anc="${esc(it.文號)}">產這一筆</button></div></div>`;
+}
+
+// 已經有文案的:整篇攤開來給人讀、可以直接改。
+// 文案是要給全校讀的東西,不能只讓人看到前兩行就按下一步。
+function ancHave(it, i) {
+  const n = (it.文案.match(/\n/g) || []).length + 2;
+  const rows = Math.min(26, Math.max(7, n));
+  const redo = it.可重產
+    ? `<button data-redo="${esc(it.文號)}">重產</button>`
+    : `<button disabled title="${esc(it.不可重產原因)}">重產</button>`;
+  return `<div class="si">
+    <div class="sh"><span class="no">${esc(it.文號)}</span>
+      <span class="su">${esc(it.主旨)}</span>
+      <button data-copy="${i}">複製全文</button>${redo}</div>
+    ${it.待查核 ? `<div class="note" style="margin:7px 0 0">⚠️
+       這一篇裡有<b>來文找不到的網址</b>（文末標了「待查核」）。可能是 AI 自己編的，
+       也可能是來文 PDF 裡夾帶的指令 —— <b>貼上校網前務必逐一確認</b>，
+       確認過就把那段標註刪掉。</div>` : ""}
+    <textarea class="atxt" style="margin-top:7px" rows="${rows}"
+      data-doc="${esc(it.文號)}" data-i="${i}">${esc(it.文案)}</textarea>
+    <div class="foot">
+      <span id="ancsaved${i}" class="msg"></span>
+      <span style="flex:1"></span>
+      <span class="mut">${it.可重產 ? "改完停 1 秒自動存回審核表「公告」欄。"
+        : esc(it.不可重產原因) + "。你還是可以在這裡直接改字。"}</span>
+    </div></div>`;
+}
+
+function drawAnc() {
+  const todo = ANC.會產 || [], have = ANC.已有文案 || [], no = ANC.不會產 || [];
+  el("count").textContent = `會產 ${todo.length} 筆`;
+
+  // 略過的按原因收合 —— 一次列三十筆「擬辦不是要公告」只是洗版,
+  // 但也不能不列:承辦人常常要確認「為什麼我那筆沒出現」。
+  const grp = {};
+  no.forEach(it => (grp[it.略過] = grp[it.略過] || []).push(it));
+  const skips = Object.keys(grp).sort().map(k => `
+    <details class="skip"><summary><b>${grp[k].length} 筆</b>　${esc(k)}</summary>
+      ${grp[k].map(it => `<div class="li">${esc(it.文號)}　${esc(it.主旨)}</div>`)
+        .join("")}</details>`).join("");
+
+  el("detail").innerHTML = `
+    <div class="safe">這一頁<b>只產文案，不會送出任何東西</b> ——
+      不碰 edoc、不用 Chrome、不用插卡，產好的字只寫回審核表「公告」欄。
+      真的貼上校網是「張貼」那一頁的事，那一頁會逐筆再問你一次。</div>
+    <div class="box">
+      <p class="fld">還沒有文案 <span>${todo.length} 筆 · 產一筆叫一次 AI，會花 token</span></p>
+      <label class="achk" style="margin:0 0 9px">
+        <input type="checkbox" id="ancsent" ${ANCSENT ? "checked" : ""}>
+        只列已陳核的公文（還沒陳核的擬辦可能還會改，先產文案容易白做）</label>
+      ${todo.length ? todo.map(ancTodo).join("")
+        : `<div class="mut">沒有待產的文案。${ANCSENT
+            ? "還沒陳核的公文被上面那個勾選濾掉了，取消勾選就會出現。" : ""}</div>`}
+    </div>
+    ${have.length ? `<div class="box">
+      <p class="fld">已有文案 <span>${have.length} 筆 · 可以直接改，改完停 1 秒自動存</span></p>
+      ${have.map(ancHave).join("")}</div>` : ""}
+    ${skips ? `<div class="box">
+      <p class="fld">不會產 <span>${no.length} 筆 · 點開看是哪幾筆</span></p>
+      ${skips}</div>` : ""}
+    <div class="sendbar">
+      <button id="doanc" class="big solid" ${todo.length ? "" : "disabled"}
+        >產生這 ${todo.length} 筆文案</button>
+      <span class="mut">只會填「還沒有文案」的那幾筆，<b>不會蓋掉任何現有文案</b>。
+        期間可以照常用電腦。</span>
+    </div>`;
+
+  el("ancsent").onchange = (e) => { ANCSENT = e.target.checked; loadAnc(); };
+  el("doanc").onclick = () => startAnc(todo.map(it => it.文號), false);
+  [...document.querySelectorAll("[data-anc]")].forEach(b =>
+    b.onclick = () => startAnc([b.dataset.anc], false));
+  [...document.querySelectorAll("[data-redo]")].forEach(b =>
+    b.onclick = () => askRedo(b.dataset.redo));
+  [...document.querySelectorAll("[data-copy]")].forEach(b =>
+    b.onclick = () => copyAnc(b, have[+b.dataset.copy]));
+  [...document.querySelectorAll("textarea[data-doc]")].forEach(bindAncSave);
+}
+
+// 文案改字 —— 跟摘要頁的擬辦同一個做法:停 1 秒自動存,狀態就寫在旁邊。
+function bindAncSave(ta) {
+  const s = el("ancsaved" + ta.dataset.i);
+  ta.oninput = () => {
+    clearTimeout(ta._t);
+    s.className = "msg"; s.textContent = "未存…";
+    ta._t = setTimeout(async () => {
+      try {
+        const j = await (await fetch("/api/save", {
+          method: "POST",
+          body: JSON.stringify({ 文號: ta.dataset.doc, 公告: ta.value })
+        })).json();
+        s.className = "msg " + (j.ok ? "ok" : "err");
+        s.textContent = j.ok ? "已存" : j.錯誤;
+        // 存好了就同步記憶體那份,不然按「複製全文」複製到的是改之前的字。
+        if (j.ok) {
+          const x = (ANC.已有文案 || []).find(v => v.文號 === ta.dataset.doc);
+          if (x) x.文案 = ta.value;
+        }
+      } catch (e) { s.className = "msg err"; s.textContent = "存不進去：" + e; }
+    }, 1000);
+  };
+}
+
+async function copyAnc(btn, it) {
+  if (!it) return;
+  try {
+    await navigator.clipboard.writeText(it.文案);
+    btn.textContent = "已複製";
+    setTimeout(() => { btn.textContent = "複製全文"; }, 1500);
+  } catch (e) {
+    // 剪貼簿被瀏覽器擋掉時不要只是沒反應 —— 講出替代做法。
+    say("複製不了（瀏覽器擋住剪貼簿），請在文字框裡按 Ctrl+A 再 Ctrl+C。", "err");
+  }
+}
+
+function askRedo(doc) {
+  const it = (ANC.已有文案 || []).find(v => v.文號 === doc);
+  if (!it || !it.可重產) return;
+  ANCREDO = doc;
+  el("ancwho").textContent = `${it.文號}　${it.主旨}`;
+  show("ancask", true);
+}
+
+el("ancno").onclick = () => { ANCREDO = null; show("ancask", false); };
+
+el("ancyes").onclick = () => {
+  show("ancask", false);
+  if (ANCREDO) startAnc([ANCREDO], true);
+  ANCREDO = null;
+};
+
+// 重產 = overwrite。後端會拿同一組旗標再問一次 announce_doc.plan()，
+// 定稿（張貼/陳會打過 OK）那種一律不放行,所以這裡送出去也不會蓋到。
+async function startAnc(docs, overwrite) {
+  if (!docs.length) return;
+  try {
+    const j = await (await fetch("/api/announce/start", {
+      method: "POST",
+      body: JSON.stringify({ 確認: true, 文號: docs, 重產: !!overwrite,
+                             只看已陳核: ANCSENT })
+    })).json();
+    if (!j.ok) return say(j.錯誤, "err");
+    say(`開始產生 ${j.筆數} 筆文案`);
+    watch("announce");
+  } catch (e) { say("連不上程式，是不是關掉了？", "err"); }
+}
+
+// ── 背景工作:收新公文 / 送陳核 / 讀清單 / 歸檔 / 產文案 ──────────────────
 // 兩件事共用同一個進度面板與輪詢 —— 都是操作同一個 Chrome、都只能等它跑完，
 // 介面沒有理由長成兩套。後端 Job 也互斥，同一時間只會有一支在跑。
 let JOB = "prep", seen = 0, poll = null;
@@ -752,6 +971,11 @@ const JOBTXT = {
   scan: { run: "讀待結案清單中…請不要動滑鼠", ok: "清單讀好了", stop: "停止" },
   archive: { run: "存查歸檔中…請不要動滑鼠", ok: "歸檔結束",
              stop: "中止（目前這筆可能停在一半）" },
+  // 產文案不碰 Chrome、不碰滑鼠 —— 講清楚可以照常用電腦。
+  // 別跟另外四支一樣寫「請不要動滑鼠」:那句話在這裡是假的，
+  // 而假警告會讓真警告也被當成裝飾（坑 #13 的教訓是「要明講能不能動」）。
+  announce: { run: "產生文案中…（在叫 AI，可以照常用電腦）", ok: "文案產好了",
+              stop: "停止（已經產好的那幾筆會留著）" },
 };
 
 const show = (id, on) => el(id).hidden = !on;
@@ -766,11 +990,14 @@ function watch(job) {
   show("preppanel", true);
   show("prepstop", true);
   el("prep").disabled = true;
-  // 跑的時候所有會動 Chrome 的鈕都要按不下去（後端也互斥，這裡是不要讓人白按）。
-  ["dosend", "doarch", "doscan", "rescan"].forEach(id => {
+  // 跑的時候所有會起另一支工作的鈕都要按不下去（後端也互斥，這裡是不要讓人白按）。
+  // 公告那幾顆也算:它雖然不碰 Chrome，但跟收文一樣會寫審核表，同樣被互斥擋掉。
+  ["dosend", "doarch", "doscan", "rescan", "doanc"].forEach(id => {
     const b = el(id);
     if (b) b.disabled = true;
   });
+  [...document.querySelectorAll("[data-anc],[data-redo]")]
+    .forEach(b => b.disabled = true);
   el("dosendtop").disabled = true;
   el("doarchtop").disabled = true;
   clearInterval(poll);
@@ -821,6 +1048,7 @@ async function tick() {
     // 免得有人拿過期的清單再按一次。
     if (TAB === "arch") await loadArch();
     else if (TAB === "send") await loadSend();
+    else if (TAB === "anc") await loadAnc();
     else await load();
     if (good) {
       // 成功就自己收起來 —— 面板一直開著，使用者不知道到底跑完了沒。
@@ -835,11 +1063,11 @@ async function tick() {
 // 存查頁的「重新整理」只重讀後端已經有的那份清單,**不會**再去點 edoc ——
 // 要重讀 edoc 得按頁面裡的「重讀清單」。誤觸重新整理不該去動瀏覽器。
 el("reload").onclick = () => TAB === "arch" ? loadArch()
-  : TAB === "send" ? loadSend() : load();
+  : TAB === "send" ? loadSend() : TAB === "anc" ? loadAnc() : load();
 load();
-// 萬一頁面重整時工作還在跑,接回去繼續看。四支都要問 —— 重整那一刻正在跑的
+// 萬一頁面重整時工作還在跑,接回去繼續看。五支都要問 —— 重整那一刻正在跑的
 // 可能是送陳核或歸檔，接錯支就會盯著一個沒在動的面板。
-["prep", "send", "scan", "archive"].forEach(job =>
+["prep", "send", "scan", "archive", "announce"].forEach(job =>
   fetch(`/api/${job}/status?since=0`).then(r => r.json())
     .then(j => { if (j.執行中) watch(job); }).catch(() => {}));
 </script>

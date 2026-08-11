@@ -86,6 +86,24 @@ def test_finished_docs_never_listed(env):
     assert (data["可送"], data["擋下"], data["候選"]) == ([], [], [])
 
 
+def test_already_sent_docs_are_not_listed(env):
+    """已有 *已陳核.txt 的公文不可以再出現在陳核頁 —— 那一關做完了。
+
+    「陳會」欄這時可能還停在 OK（upsert 只填空白格，做完不會被改寫，
+    交接檔坑 #1）。2026-08-06 承辦人畫面上就卡了 5 筆這種，理由全是
+    「先前送過」，還得一筆一筆取消勾選。以磁碟痕跡為準直接跳過。
+    """
+    work, sheet = env
+    _doc(work, "MWAA0001", marks=("已陳核.txt",))
+    _doc(work, "MWAA0002")
+    rs.upsert([{"文號": "MWAA0001", "擬辦": DEFAULT, "陳會": "OK"},
+               {"文號": "MWAA0002", "擬辦": DEFAULT, "陳會": "OK"}], path=sheet)
+    data, _ = ui.send_payload()
+    assert [i["文號"] for i in data["可送"]] == ["MWAA0002"]
+    assert data["擋下"] == []
+    assert data["已送過"] == ["MWAA0001"]
+
+
 def test_page_and_cli_agree(env):
     """畫面說會送的，要跟 CLI（post_draft_batch.plan）算的完全一樣。
 
@@ -167,6 +185,59 @@ def test_chrome_state_detects_logout(monkeypatch):
     s = ui.chrome_state()
     assert s["ok"] is False
     assert "登出" in s["說明"]
+
+
+# ── 「操作時間逾期」的警告視窗（2026-08-10）─────────────────────────────────
+
+HOME_URL = "https://edoc.gov.taipei/tcqb/home/default.jsp?inLine=Y"
+TIMEOUT_URL = "https://edoc.gov.taipei/tcqb/home/sessionTimeout.jsp"
+
+
+def _fake_tabs(monkeypatch, urls):
+    """假造 DevTools 回的分頁清單。"""
+    import urllib.request as ur
+
+    class _Resp:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+        def read(self):
+            return json.dumps(
+                [{"type": "page", "url": u} for u in urls]).encode()
+
+    monkeypatch.setattr(ur, "urlopen", lambda *a, **k: _Resp())
+
+
+def test_chrome_state_detects_session_timeout(monkeypatch):
+    """逾期警告視窗跳出來就要擋 —— **就算主畫面看起來還在**。
+
+    2026-08-10 回歸測試。那個視窗的網址是 /tcqb/home/sessionTimeout.jsp，
+    **含 /tcqb/home/**;原本這裡用 any("/tcqb/home/" in u) 認主畫面，被它冒充
+    過去 → chrome_state 對一個已經被踢出去的 Chrome 回 ok=True。
+    陳核頁與存查頁共用這盞燈，等於兩頁都亮綠燈讓人按下送出。
+    實測承辦人當時的 Chrome:主視窗已被踢回 index.jsp，警告視窗還開著。
+    """
+    _fake_tabs(monkeypatch, [TIMEOUT_URL, HOME_URL])
+    s = ui.chrome_state()
+    assert s["ok"] is False
+    assert "逾期" in s["說明"]
+    assert "關掉" in s["說明"]          # 下一步要講:那個小視窗得先關掉
+
+
+def test_timeout_page_is_not_a_home_page():
+    """sessionTimeout.jsp 住在 /tcqb/home/ 底下，但它不是主畫面。
+
+    「共用同一個特徵字串前，先確認另一條路的長相真的一樣」—— 坑 #17。
+    """
+    assert pdb.has_home([HOME_URL]) is True
+    assert pdb.has_home([TIMEOUT_URL]) is False
+    assert pdb.looks_timed_out([TIMEOUT_URL]) is True
+    assert pdb.looks_timed_out([HOME_URL]) is False
+    # 逾期也算「要重新登入」—— 存查那條路是靠 looks_logged_out 給訊息的。
+    assert pdb.looks_logged_out([TIMEOUT_URL]) is True
 
 
 def test_start_blocked_when_chrome_down(env, srv, monkeypatch):
