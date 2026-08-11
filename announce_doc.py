@@ -42,6 +42,11 @@ def announce_model():
     from summarize_doc import _read_config
     return _read_config("announce_claude_model") or ANNOUNCE_MODEL_DEFAULT
 
+# 文案裡出現「來文沒有的網址」時貼在文末的標記(見 _flag_stray_links)。
+# 拉成常數是因為 ui.py 的公告頁要靠它認出「這篇要人工查核」——
+# 兩邊各寫一次字串,哪天改了標記文字,介面那個紅字提醒就會默默消失。
+STRAY_MARK = "⚠️【待查核】"
+
 # LLM 偶爾會加開場白 / 用 ``` 包起來 — 清掉再存
 _FENCE_RE = re.compile(r"^\s*```[a-zA-Z]*\s*\n(.*?)\n\s*```\s*$", re.S)
 _TITLE_RE = re.compile(r"^【.+?】")
@@ -250,7 +255,7 @@ def _flag_stray_links(out, source_text):
     if not stray:
         return out
     print(f"      [WARN] 公告出現來文沒有的網址,已標註:{stray}")
-    warn = "\n\n⚠️【待查核】以下網址在來文中找不到，貼出前請確認：\n" + \
+    warn = f"\n\n{STRAY_MARK}以下網址在來文中找不到，貼出前請確認：\n" + \
            "\n".join(f"　· {u}" for u in stray)
     return out + warn
 

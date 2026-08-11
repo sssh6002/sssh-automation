@@ -393,16 +393,24 @@ def approved(gate, path=None):
     return [r for r in rows(path) if is_approved(r.get(gate))]
 
 
-def prepare(scan_dirs=None):
+def prepare(scan_dirs=None, only=None):
     """對「還沒備料」的公文目錄補跑 LLM 摘要。回 (成功數, 失敗清單)。
 
     只處理已下載但缺 內容.txt／總結.md 的目錄 —— 下載本身要讀卡機,不在這裡做。
     這是 `--prepare` 的本體:讓「新公文進不來」有一個指令可以解。
+
+    only — 只處理這幾個公文目錄(路徑 list)。給 `prep_batch` 收新公文那條路用:
+           工作區裡躺著歷史公文,有些是早期跑到一半留下的空殼(2026-08-10 實測
+           有 9 個),按一次「收新公文」不該默默對它們全部叫 LLM。
+           不給 = 全部缺總結的都補(`--prepare` 的原本行為,一個字沒變)。
     """
     from summarize_doc import summarize_doc
     ok, failed = 0, []
     todo = [d for d in iter_doc_dirs(scan_dirs)
             if not glob.glob(os.path.join(d, "*總結.*.md"))]
+    if only is not None:
+        keep = {os.path.abspath(p) for p in only}
+        todo = [d for d in todo if os.path.abspath(d) in keep]
     if not todo:
         print("[review_sheet] 沒有待備料的公文目錄。")
         return 0, []
