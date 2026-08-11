@@ -267,13 +267,46 @@ _VIEWER_MARK = "oa/index.html?app="
 # 登出／回到登入頁的網址特徵。2026-08-06:閒置一陣子後 Chrome 只剩
 # `index.jsp?logout=Y` 一個分頁,這時說「找不到公文系統主畫面」太含糊 ——
 # 講「已經登出」才知道下一步是重新登入。
-_LOGOUT_MARKS = ("logout=y", "/tcqb/index.jsp")
+# 「操作時間逾期，請您重新登入」那個警告視窗。三件事讓它特別會騙人:
+#   1. 它是 edoc 自己 window.open 開的**獨立視窗**，不是 JS alert ——
+#      taipeion_login_selenium 那段「自動接受所有 JS dialog」按不掉它，
+#      它會一直堆在那裡。
+#   2. 它的網址住在 **/tcqb/home/** 底下，跟公文系統主畫面同一個路徑。
+#   3. 它自己是 edoc 網域，所以「有沒有在 edoc」那種檢查一律放行（坑 #9 同型）。
+# 2026-08-10 實測:承辦人收文時它一直跳，而 ui.chrome_state 那兩道
+# 「有沒有 /tcqb/home/」的檢查被它冒充成主畫面 —— 整個已登出的狀態亮綠燈，
+# 陳核頁與存查頁的送出鈕照樣可以按。
+_TIMEOUT_MARK = "/tcqb/home/sessiontimeout.jsp"
+_HOME_MARK = "/tcqb/home/"
+_LOGOUT_MARKS = ("logout=y", "/tcqb/index.jsp", _TIMEOUT_MARK)
 
 
 def looks_logged_out(urls):
-    """從分頁網址判斷 edoc 是不是已經登出。"""
+    """從分頁網址判斷 edoc 是不是已經登出（含逾期被踢出來）。"""
     low = [str(u or "").lower() for u in urls]
     return bool(low) and any(any(m in u for m in _LOGOUT_MARKS) for u in low)
+
+
+def looks_timed_out(urls):
+    """有沒有那個「操作時間逾期」的警告視窗。
+
+    跟 looks_logged_out 分開是因為**下一步不一樣**:逾期時畫面上還多一個
+    關不掉的小視窗，得先請人關掉它，不然重新登入之後它還杵在那裡繼續騙
+    後面的檢查。
+    """
+    return any(_TIMEOUT_MARK in str(u or "").lower() for u in urls)
+
+
+def has_home(urls):
+    """有沒有停在公文系統主畫面（左側有選單那個頁面）。
+
+    **sessionTimeout.jsp 不算** —— 它也住在 /tcqb/home/ 底下，但那是
+    「你已經被踢出去了」的告示，不是主畫面。只比對 /tcqb/home/ 會把它當成
+    主畫面，於是「已經登出」這件事永遠檢查不出來。
+    共用同一個特徵字串前先確認另一條路的長相真的一樣 —— 坑 #17 的教訓。
+    """
+    low = [str(u or "").lower() for u in urls]
+    return any(_HOME_MARK in u and _TIMEOUT_MARK not in u for u in low)
 
 
 def viewer_tabs(driver):
