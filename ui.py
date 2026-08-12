@@ -388,6 +388,10 @@ def send_payload():
         else:
             cand.append(slim(it))
     return {"可送": ready, "擋下": blocked, "候選": cand, "已送過": sent,
+            # 你標成「自己辦掉了」的那幾筆。標了就從上面三堆消失（程式不該再碰），
+            # 但**消失之後要有地方反悔** —— 標錯一筆的代價是那份公文從此沒人辦。
+            "自辦": [{"文號": str(r["文號"]).strip(), "主旨": r.get("主旨") or ""}
+                     for r in rs.marked_done("陳會")],
             "chrome": chrome_state()}, note
 
 
@@ -502,6 +506,11 @@ def announce_payload(sent_only=True):
         else:
             other.append({**base(it), "略過": it["略過"]})
     return {"會產": ready, "已有文案": have, "不會產": other,
+            # 這一頁的「我自己辦掉了」寫的是「張貼」欄（公告文案與張貼是同一條軌:
+            # announce_doc.plan() 看到那一欄已辦就整筆略過）。所以放回的入口
+            # 跟張貼頁是同一份清單，兩頁都看得到、都能放回。
+            "自辦": [{"文號": str(r["文號"]).strip(), "主旨": r.get("主旨") or ""}
+                     for r in rs.marked_done("張貼")],
             "只看已陳核": bool(sent_only)}, note
 
 
@@ -547,6 +556,10 @@ def web_payload():
             "擋下": [pwb._slim(i) for i in blocked],
             "候選": [pwb._slim(i) for i in cand],
             "警告": warn,
+            # 同陳核頁:標成「自己辦掉了」的要有地方看見、有地方反悔。
+            # 這一頁也是「張貼」那一關的反悔處 —— 公告頁標的是同一欄。
+            "自辦": [{"文號": str(r["文號"]).strip(), "主旨": r.get("主旨") or ""}
+                     for r in rs.marked_done("張貼")],
             # 這盞燈跟陳核／存查那盞（chrome_state）**不是同一件事**，
             # 條件正好相反 —— 不要共用，共用就一定有一頁是錯的。
             "chrome": {"ok": busy is None, "說明": busy}}, note

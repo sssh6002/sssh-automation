@@ -299,62 +299,71 @@ def test_heading_style_restores_even_on_error():
 # 從實物讀到:那欄是 `input[id^=ct-etAnnoGroup-]`，沒選時是「無群組」，
 # 旁邊 hidden 才是真正送出去的群組 id。
 
-class _FakeDriver:
-    """execute_script 照 states 依序回答（最後一個會一直重複）。"""
-
-    def __init__(self, states):
-        self.states = list(states)
-        self.calls = 0
-
-    def execute_script(self, js, *a):
-        self.calls += 1
-        return self.states[min(self.calls, len(self.states)) - 1]
+UNIT = "資訊媒體組"
 
 
-def _patched_selector(monkeypatch, real):
-    """裝上 verified_publish_unit，回被換過的那支。"""
+def _patched_selector(monkeypatch, real=lambda d, u: True, reads=(), clicks=()):
+    """裝上 verified_publish_unit，回被換過的那支。
+
+    reads  —— read_publish_unit 依序回什麼（最後一個會一直重複）
+    clicks —— click_unit_option 依序回什麼（同上）
+    """
     from document_closure import document_closure_post_web as pw
     monkeypatch.setattr(pw, "_select_publish_unit", real)
-    with pwb.verified_publish_unit(tries=3, wait=0):
+    seq = {"r": 0, "c": 0}
+
+    def pick(kind, pool):
+        i = seq[kind]
+        seq[kind] += 1
+        return pool[min(i, len(pool) - 1)] if pool else None
+
+    monkeypatch.setattr(pwb, "read_publish_unit", lambda d: pick("r", list(reads)))
+    monkeypatch.setattr(pwb, "open_unit_dropdown", lambda d: True)
+    monkeypatch.setattr(pwb, "unit_option_count", lambda d, u: 2)
+    monkeypatch.setattr(pwb, "click_unit_option",
+                        lambda d, u, i: pick("c", list(clicks)))
+    monkeypatch.setattr(pwb.time, "sleep", lambda *a: None)
+    with pwb.verified_publish_unit(tries=2, wait=0):
         return pw._select_publish_unit
 
 
-OKST = {"value": "資訊媒體組", "id": "ct-etAnnoGroup-x", "hidden": "g99"}
-BADST = {"value": "無群組", "id": "ct-etAnnoGroup-x", "hidden": ""}
+def _st(value):
+    return {"value": value, "id": "ct-etAnnoGroup-x", "hidden": ""}
 
 
 def test_unit_verified_ok(monkeypatch):
-    sel = _patched_selector(monkeypatch, lambda d, u: True)
-    assert sel(_FakeDriver([OKST]), "資訊媒體組") is True
+    """原本那支就設對了 → 直接放行。"""
+    sel = _patched_selector(monkeypatch, reads=[_st(UNIT)])
+    assert sel(object(), UNIT) is True
 
 
-def test_unit_retries_then_succeeds(monkeypatch):
-    """第一次沒設進去 → 重試原本那支（不自己塞值）→ 成功。"""
-    tries = []
+def test_unit_clicks_option_itself_then_verifies(monkeypatch):
+    """原本那支沒設進去 → 自己點下拉的候選 → 讀回來對了才放行。"""
     sel = _patched_selector(monkeypatch,
-                            lambda d, u: (tries.append(1), True)[1])
-    assert sel(_FakeDriver([BADST, OKST]), "資訊媒體組") is True
-    assert len(tries) == 2                      # 有真的重試
+                            reads=[_st("圖書館"), _st(UNIT)], clicks=[True])
+    assert sel(object(), UNIT) is True
 
 
 def test_unit_blocks_when_never_set(monkeypatch):
-    """一直設不進去 → 回 False，讓 _submit_announcement 停下不發。
+    """怎麼點都設不進去 → 回 False，讓 _submit_announcement 停下不發。
 
     沒選單位的公告會被校網掛成該頁所屬單位（圖書館）——
     **寧可不貼，也不要貼成別的單位。**
+    2026-08-12 實跑就是這個結果:擋住、一筆都沒貼、結束碼 1。
     """
-    sel = _patched_selector(monkeypatch, lambda d, u: True)
-    assert sel(_FakeDriver([BADST]), "資訊媒體組") is False
+    sel = _patched_selector(monkeypatch, reads=[_st("圖書館")], clicks=[True])
+    assert sel(object(), UNIT) is False
 
 
-def test_unit_blocks_when_hidden_id_empty(monkeypatch):
-    """文字對了但 hidden 群組 id 是空的 = 等於沒選到，照樣擋。
+def test_unit_hidden_field_is_not_a_gate(monkeypatch):
+    """`hidden` 只印出來參考，**不當判斷依據**。
 
-    這是「光把文字塞進 input」會出現的樣子 —— 看起來對，送出去沒有單位。
+    當初以為那是送出去的群組 id，但那是猜的（那一列附近不只一個 hidden）。
+    拿沒證實的東西當閘門，結果會是「明明選對了卻整批不給貼」。
+    證實過的判斷只有一個:那個 input 的值要等於要的單位。
     """
-    sel = _patched_selector(monkeypatch, lambda d, u: True)
-    st = {"value": "資訊媒體組", "id": "ct-etAnnoGroup-x", "hidden": ""}
-    assert sel(_FakeDriver([st]), "資訊媒體組") is False
+    sel = _patched_selector(monkeypatch, reads=[_st(UNIT)])
+    assert sel(object(), UNIT) is True          # hidden 是空的，照樣放行
 
 
 def test_unit_does_not_block_when_unreadable(monkeypatch):
@@ -363,8 +372,8 @@ def test_unit_does_not_block_when_unreadable(monkeypatch):
     假警告會讓真警告一起被當成裝飾（坑 #13）;而這道擋下去的代價是整批停下，
     不能靠猜。只在「證明是錯的」時候擋。
     """
-    sel = _patched_selector(monkeypatch, lambda d, u: True)
-    assert sel(_FakeDriver([None]), "資訊媒體組") is True
+    sel = _patched_selector(monkeypatch, reads=[None])
+    assert sel(object(), UNIT) is True
 
 
 def test_unit_wrapper_restores_even_on_error():

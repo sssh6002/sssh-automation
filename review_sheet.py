@@ -393,6 +393,35 @@ def approved(gate, path=None):
     return [r for r in rows(path) if is_approved(r.get(gate))]
 
 
+def marked_done(gate, path=None):
+    """回「這一關我自己辦掉了」的那幾筆 —— 那一關標成已辦、但整份還沒辦完。
+
+    這是給介面「**你標成自己辦掉的有這幾筆**」那一區用的。為什麼需要它:
+    標了已辦的公文會從那一頁整批消失（程式就是不該再碰它們），但消失之後
+    **就沒有地方可以反悔了** —— 而標錯一筆的成本是那份公文從此沒人辦。
+    所以標示要跟「放回待辦」長在同一頁。
+
+    已經整份辦完的（`is_archived`）不列 —— 那些歸「舊文」頁，那裡本來就有
+    「放回待辦」。這裡只列**卡在半路**、被你手動接手的那幾筆。
+    """
+    if gate not in GATES:
+        raise ValueError(f"gate 必須是 {GATES} 之一,收到 {gate!r}")
+    dirs = {}
+    for d in iter_doc_dirs():
+        m = _DOC_NO_RE.search(os.path.basename(d))
+        if m:
+            dirs.setdefault(m.group(1), d)
+    out = []
+    for r in rows(path):
+        if not is_done(r.get(gate)):
+            continue
+        no = str(r["文號"]).strip()
+        if is_archived(r, dirs.get(no)):
+            continue
+        out.append(r)
+    return out
+
+
 def prepare(scan_dirs=None, only=None):
     """對「還沒備料」的公文目錄補跑 LLM 摘要。回 (成功數, 失敗清單)。
 

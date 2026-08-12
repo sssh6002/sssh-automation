@@ -326,6 +326,60 @@ def test_start_runs_when_list_and_content_match(env, srv):
                            f"--expect=MWAA0001:{mark}"]
 
 
+# ── 「這筆我自己辦掉了」 ───────────────────────────────────────────────────
+#
+# 審核表那兩欄是三態:空白＝還沒審、OK＝請程式去做、**已辦＝我手動辦掉了**。
+# 資料層本來就吃第三態，缺的是按鈕與「標了之後去哪裡反悔」。
+
+def test_marked_done_drops_out_of_the_page(env):
+    """標成已辦的公文從三堆消失，但要出現在「自辦」那一區（可以放回）。"""
+    work, sheet = env
+    for no in ("MWAA0001", "MWAA0002"):
+        _doc(work, no)
+    rs.upsert([{"文號": "MWAA0001", "公告": TEXT, "張貼": "已辦"},
+               {"文號": "MWAA0002", "公告": TEXT, "張貼": "OK"}], path=sheet)
+    data, _ = ui.web_payload()
+    assert [i["文號"] for i in data["可貼"]] == ["MWAA0002"]
+    assert data["候選"] == [] and data["擋下"] == []
+    assert [i["文號"] for i in data["自辦"]] == ["MWAA0001"]
+
+
+def test_finished_docs_are_not_in_the_self_done_list(env):
+    """整份辦完的（已存查＋已公告）不列在「自辦」—— 那些歸舊文頁。
+
+    不然那一區會越積越長，最後跟「舊文」變成同一份清單。
+    """
+    work, sheet = env
+    _doc(work, "MWAA0001", marks=("已存查.txt", "已公告.txt"))
+    rs.upsert({"文號": "MWAA0001", "公告": TEXT, "張貼": "已辦"}, path=sheet)
+    data, _ = ui.web_payload()
+    assert data["自辦"] == []
+
+
+def test_marked_done_is_never_posted(env, srv):
+    """標成已辦的，就算有人硬 POST 也貼不出去（現算的清單裡沒有它）。"""
+    work, sheet = env
+    _doc(work, "MWAA0001")
+    rs.upsert({"文號": "MWAA0001", "公告": TEXT, "張貼": "已辦"}, path=sheet)
+    base, calls = srv
+    r = _post(base, "/api/web/start",
+              {"確認": True, "文號": ["MWAA0001"], "指紋": {"MWAA0001": "x"}})
+    assert r["ok"] is False
+    assert calls == []
+
+
+def test_gate_column_accepts_other_done_words(env):
+    """「手動」「不用」「跳過」這些寫法也算已辦 —— 承辦人在 Excel 手打不會統一。"""
+    work, sheet = env
+    for no, word in (("MWAA0001", "手動"), ("MWAA0002", "不用"),
+                     ("MWAA0003", "跳過")):
+        _doc(work, no)
+        rs.upsert({"文號": no, "公告": TEXT, "張貼": word}, path=sheet)
+    data, _ = ui.web_payload()
+    assert data["可貼"] == [] and data["候選"] == []
+    assert len(data["自辦"]) == 3
+
+
 # ── 進度浮窗要認得這支工作 ─────────────────────────────────────────────────
 
 def test_hud_knows_the_web_job():

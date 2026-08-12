@@ -120,6 +120,49 @@ def test_page_and_cli_agree(env):
     assert [i["文號"] for i in data["可送"]] == [i["文號"] for i in ready]
 
 
+def test_marked_done_moves_to_self_done_list(env):
+    """標成「陳會=已辦」的從三堆消失，但要出現在「自辦」那一區（可以放回）。
+
+    2026-08-12 承辦人的要求:「手動處理的標示,不要再撈進來」。
+    資料層（DONE_TOKENS）本來就吃這個，缺的是按鈕與**標了之後去哪裡反悔** ——
+    標錯一筆的代價是那份公文從此沒人辦，所以標示與放回要在同一頁。
+    """
+    work, sheet = env
+    _doc(work, "MWAA0001")
+    _doc(work, "MWAA0002")
+    rs.upsert([{"文號": "MWAA0001", "擬辦": DEFAULT, "陳會": "已辦"},
+               {"文號": "MWAA0002", "擬辦": DEFAULT, "陳會": "OK"}], path=sheet)
+    data, _ = ui.send_payload()
+    assert [i["文號"] for i in data["可送"]] == ["MWAA0002"]
+    assert (data["擋下"], data["候選"]) == ([], [])
+    assert [i["文號"] for i in data["自辦"]] == ["MWAA0001"]
+
+
+def test_self_done_list_excludes_finished(env):
+    """整份辦完的不列在「自辦」—— 那些歸舊文頁，不然這一區會變成第二份舊文。"""
+    work, sheet = env
+    _doc(work, "MWAA0001", marks=("已存查.txt",))
+    rs.upsert({"文號": "MWAA0001", "擬辦": DEFAULT, "陳會": "已辦",
+               "張貼": "已辦"}, path=sheet)
+    data, _ = ui.send_payload()
+    assert data["自辦"] == []
+
+
+def test_marked_done_gate_is_per_page(env):
+    """兩關各自獨立:陳核頁標的是「陳會」，不會順手把「張貼」也標掉。
+
+    手動送陳核 ≠ 手動貼校網。摘要頁那顆「這筆我辦完了」才是兩關一起。
+    """
+    work, sheet = env
+    _doc(work, "MWAA0001")
+    rs.upsert({"文號": "MWAA0001", "擬辦": DEFAULT, "陳會": "已辦"}, path=sheet)
+    row = next(r for r in rs.rows(sheet) if r["文號"] == "MWAA0001")
+    assert rs.is_done(row.get("陳會")) is True
+    assert rs.is_done(row.get("張貼")) is False
+    assert rs.marked_done("陳會", sheet)[0]["文號"] == "MWAA0001"
+    assert rs.marked_done("張貼", sheet) == []
+
+
 # ── 送出入口的關卡 ─────────────────────────────────────────────────────────
 
 @pytest.fixture

@@ -521,6 +521,64 @@ async function pick(r) {
   }
 }
 
+// ── 「這筆我自己辦掉了」（三頁共用）──────────────────────────────────────
+//
+// 審核表那兩欄是三態,不是勾選框:
+//   空白 = 還沒審,等你決定
+//   OK   = 請程式去做
+//   已辦 = **我手動辦掉了,程式完全不要碰**
+// 資料層（review_sheet 的 DONE_TOKENS）本來就吃第三態,四支執行器也都認 ——
+// 缺的一直是**按鈕**:所以手動辦掉的公文會永遠躺在「其他待辦」裡積著。
+//
+// ⚠️ 標了之後那一筆會從清單上消失（程式就是不該再碰它）,而**消失之後要有地方
+// 反悔** —— 標錯一筆的代價是那份公文從此沒人辦。所以每一頁底下都有一區
+// 「你標成自己辦掉的」,可以放回待辦。
+async function markHand(btn, gate, val, reload) {
+  const doc = btn.dataset.hand || btn.dataset.back;
+  btn.disabled = true;
+  btn.textContent = val ? "標記…" : "放回…";
+  try {
+    const j = await (await fetch("/api/save", {
+      method: "POST", body: JSON.stringify({ 文號: doc, [gate]: val })
+    })).json();
+    if (!j.ok) { btn.disabled = false; return say(j.錯誤, "err"); }
+  } catch (e) { btn.disabled = false; return say("存不進去：" + e, "err"); }
+  await reload();
+  // 標完那一筆會從這一頁消失,而它去哪裡有**兩種**可能,不講的話會像不見了:
+  //   · 兩道關卡都辦完了 → 整份結束,移到「舊文」（那裡有「放回待辦」）
+  //   · 還有一關沒完   → 留在這一頁底下的「你標成自己辦掉的」
+  say(val ? "已標記。這一筆若兩道關卡都辦完了會移到「舊文」，"
+          + "否則留在下面「你標成自己辦掉的」那一區。"
+          : "已放回待辦。", "ok");
+}
+
+// 每一列那顆。文字寫「我自己辦掉了」而不是「移除」—— 動詞要說出這是什麼意思,
+// 不然會被讀成「從清單刪掉」（那是另一件事,而且會讓人以為公文不見了）。
+function handBtn(doc) {
+  return `<button data-hand="${esc(doc)}"
+    title="標成「已辦」:程式以後都不會再碰這一筆。可以在頁面底下放回。"
+    >我自己辦掉了</button>`;
+}
+
+function handSection(list, gate) {
+  if (!list || !list.length) return "";
+  return `<div class="box">
+    <p class="fld">你標成「自己辦掉了」的 <span>${list.length} 筆 ·
+      程式不會再碰（審核表「${gate}」欄＝已辦）</span></p>
+    ${list.map(it => `<div class="si dim"><div class="sh">
+      <span class="no">${esc(it.文號)}</span>
+      <span class="su">${esc(it.主旨)}</span>
+      <button data-back="${esc(it.文號)}">↩ 放回待辦</button></div></div>`).join("")}
+  </div>`;
+}
+
+function handButtons(gate, reload) {
+  [...document.querySelectorAll("[data-hand]")].forEach(b =>
+    b.onclick = () => markHand(b, gate, "已辦", reload));
+  [...document.querySelectorAll("[data-back]")].forEach(b =>
+    b.onclick = () => markHand(b, gate, "", reload));
+}
+
 // ── 陳核頁 ────────────────────────────────────────────────────────────────
 //
 // 這一頁**會真的把公文送出去，而且收不回來**。所以介面照 post_draft_batch.py
@@ -555,11 +613,13 @@ function sendItem(it, kind) {
   // 按鈕文字一律講清楚是「加入」還是「移除」。只寫「不送了」會被讀成
   // 「這顆是送出鈕」（2026-08-05 承辦人回報）—— 動詞要帶方向。
   const btn = kind === "goask" ? ""
-    : kind === "cand"
-      ? (blocked ? "" : `<button data-doc="${esc(it.文號)}" data-act="on"
-            >＋ 加入送出</button>`)
-      : `<button data-doc="${esc(it.文號)}" data-act="off">${
-          kind === "go" ? "✕ 這筆不送" : "✕ 取消勾選"}</button>`;
+    : (kind === "cand"
+        ? (blocked ? "" : `<button data-doc="${esc(it.文號)}" data-act="on"
+              >＋ 加入送出</button>`)
+        : `<button data-doc="${esc(it.文號)}" data-act="off">${
+            kind === "go" ? "✕ 這筆不送" : "✕ 取消勾選"}</button>`)
+      // 你自己在 edoc 送掉的公文,程式沒有痕跡可以認（坑 #2）,只能你講一聲。
+      + handBtn(it.文號);
   // 實際送進 edoc 的長相 = fill_in_draft.yaml 的模板:第一行「擬:」，第二行承辦文字。
   const body = (kind === "go" || kind === "goask")
     ? `<div class="stxt">擬:\n${esc(it.送出文字)}</div>` +
@@ -600,6 +660,7 @@ function drawSend() {
           `${stuck.length} 筆 · 程式不會碰這些，請自行在 edoc 處理`, stuck, "no", "") : ""}
     ${sec("其他待辦", `${cand.length} 筆 · 按「要送」等於在審核表「陳會」欄打 OK`,
           cand, "cand", "待辦都處理過了。")}
+    ${handSection(PLAN.自辦, "陳會")}
     <div class="sendbar">
       <button id="dosend" class="big risk" ${
         go.length && cr.ok ? "" : "disabled"}>送出這 ${go.length} 筆</button>
@@ -609,6 +670,7 @@ function drawSend() {
     </div>`;
   [...document.querySelectorAll("[data-doc]")].forEach(b =>
     b.onclick = () => gate(b, b.dataset.act === "on" ? "OK" : ""));
+  handButtons("陳會", loadSend);
   el("dosend").onclick = askSend;
   // 上面那顆與底下那顆是同一個動作,狀態要一起走,不然會出現「上面能按、
   // 下面是灰的」這種鬼畫面。
@@ -850,7 +912,8 @@ function ancTodo(it) {
   return `<div class="si">
     <div class="sh"><span class="no">${esc(it.文號)}</span>
       <span class="su">${esc(it.主旨)}</span>
-      <button data-anc="${esc(it.文號)}">產這一筆</button></div></div>`;
+      <button data-anc="${esc(it.文號)}">產這一筆</button>
+      ${handBtn(it.文號)}</div></div>`;
 }
 
 // 已經有文案的:整篇攤開來給人讀、可以直接改。
@@ -864,7 +927,7 @@ function ancHave(it, i) {
   return `<div class="si">
     <div class="sh"><span class="no">${esc(it.文號)}</span>
       <span class="su">${esc(it.主旨)}</span>
-      <button data-copy="${i}">複製全文</button>${redo}</div>
+      <button data-copy="${i}">複製全文</button>${redo}${handBtn(it.文號)}</div>
     ${it.待查核 ? `<div class="note" style="margin:7px 0 0">⚠️
        這一篇裡有<b>來文找不到的網址</b>（文末標了「待查核」）。可能是 AI 自己編的，
        也可能是來文 PDF 裡夾帶的指令 —— <b>貼上校網前務必逐一確認</b>，
@@ -911,6 +974,7 @@ function drawAnc() {
     ${skips ? `<div class="box">
       <p class="fld">不會產 <span>${no.length} 筆 · 點開看是哪幾筆</span></p>
       ${skips}</div>` : ""}
+    ${handSection(ANC.自辦, "張貼")}
     <div class="sendbar">
       <button id="doanc" class="big solid" ${todo.length ? "" : "disabled"}
         >產生這 ${todo.length} 筆文案</button>
@@ -926,6 +990,7 @@ function drawAnc() {
     b.onclick = () => askRedo(b.dataset.redo));
   [...document.querySelectorAll("[data-copy]")].forEach(b =>
     b.onclick = () => copyAnc(b, have[+b.dataset.copy]));
+  handButtons("張貼", loadAnc);
   [...document.querySelectorAll("textarea[data-doc]")].forEach(bindAncSave);
 }
 
@@ -1035,11 +1100,13 @@ async function loadWeb() {
 function webItem(it, kind) {
   const blocked = !!it.擋下原因;
   const btn = kind === "goask" ? ""
-    : kind === "cand"
-      ? (blocked ? "" : `<button data-web="${esc(it.文號)}" data-act="on"
-            >＋ 加入張貼</button>`)
-      : `<button data-web="${esc(it.文號)}" data-act="off">${
-          kind === "go" ? "✕ 這筆不貼" : "✕ 取消勾選"}</button>`;
+    : (kind === "cand"
+        ? (blocked ? "" : `<button data-web="${esc(it.文號)}" data-act="on"
+              >＋ 加入張貼</button>`)
+        : `<button data-web="${esc(it.文號)}" data-act="off">${
+            kind === "go" ? "✕ 這筆不貼" : "✕ 取消勾選"}</button>`)
+      // 你自己貼上校網、或決定這篇不用貼 —— 都是這一顆。
+      + handBtn(it.文號);
   // 會貼的那幾筆要看得到**實際上校網長什麼樣**:標題／分類／附件是表單欄位
   // （等寬框核對），內文是全校要讀的那幾百字（攤開來、正常字體）。
   const body = (kind === "go" || kind === "goask")
@@ -1088,6 +1155,7 @@ function drawWeb() {
           `${stuck.length} 筆 · 程式不會碰這些`, stuck, "no", "") : ""}
     ${sec("其他待辦", `${cand.length} 筆 · 按「＋ 加入張貼」等於在審核表「張貼」欄打 OK`,
           cand, "cand", "待辦都處理過了。")}
+    ${handSection(WEB.自辦, "張貼")}
     <div class="sendbar">
       <button id="doweb" class="big risk" ${
         go.length && !blocked ? "" : "disabled"}>貼上校網（${go.length} 筆）</button>
@@ -1097,6 +1165,7 @@ function drawWeb() {
     </div>`;
   [...document.querySelectorAll("[data-web]")].forEach(b =>
     b.onclick = () => gateWeb(b, b.dataset.act === "on" ? "OK" : ""));
+  handButtons("張貼", loadWeb);
   el("doweb").onclick = askWeb;
   // 上面那顆與底下那顆是同一個動作,狀態要一起走。
   const top = el("dowebtop");
@@ -1190,7 +1259,10 @@ function watch(job) {
     const b = el(id);
     if (b) b.disabled = true;
   });
-  [...document.querySelectorAll("[data-anc],[data-redo],[data-web]")]
+  // 標示／放回也要停掉:它們寫的是桌面那份 xlsx，而正在跑的工作（收文、
+  // 產文案）同樣在寫那一份，兩邊同時 load→save 會互相蓋掉。
+  [...document.querySelectorAll(
+    "[data-anc],[data-redo],[data-web],[data-hand],[data-back]")]
     .forEach(b => b.disabled = true);
   el("dosendtop").disabled = true;
   el("doarchtop").disabled = true;

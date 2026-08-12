@@ -30,6 +30,7 @@ import contextlib
 import json
 import os
 import sys
+import time
 
 sys.stdout.reconfigure(encoding="utf-8")
 
@@ -354,17 +355,103 @@ for (var i = 0; i < 3 && box && !hid; i++) {
 return {value: String(el.value || ''), id: el.id, hidden: hid};
 """
 
+# 找「真的可以點的那個選項」。原本那支失敗的原因就在這裡（2026-08-12 實跑診斷）:
+# 它在**整份 document** 裡找文字相符的元素就點，於是
+#   · 看不見的元素（下拉還沒 render 完）也算 —— 點了等於沒點，但它回報成功
+#   · 圖書館那頁側邊選單有一個 `<a href="info">資訊媒體組</a>` —— 點下去會**離開表單**
+# 所以這裡加三道:只認葉節點、**必須看得見**、**排除會導覽的連結**;
+# 而且把長得像下拉選單的（祖先 class/role 含 dropdown/menu/listbox）排在前面。
+_UNIT_CANDS_JS = r"""
+function cands(unit) {
+    var inp = document.querySelector('input[id^="ct-etAnnoGroup-"]');
+    var hit = [];
+    document.querySelectorAll('li,option,a,span,div,td,p,button').forEach(
+        function (n) {
+            if (n === inp || n.children.length) return;
+            if ((n.textContent || '').trim() !== unit) return;
+            if (!n.getClientRects().length) return;          // 看不見的不點
+            if (n.tagName === 'A') {                          // 會導覽的不點
+                var h = n.getAttribute('href') || '';
+                if (h && h !== '#' && h.indexOf('javascript:') !== 0) return;
+            }
+            var score = 0, p = n;
+            for (var i = 0; i < 5 && p; i++) {
+                var c = (String(p.className || '') + ' '
+                         + (p.getAttribute && (p.getAttribute('role') || '')))
+                        .toLowerCase();
+                if (/dropdown|menu|listbox|select|option/.test(c)) { score = 1; break; }
+                p = p.parentElement;
+            }
+            hit.push({n: n, score: score});
+        });
+    hit.sort(function (a, b) { return b.score - a.score; });   // 像下拉的排前面
+    return hit.map(function (h) { return h.n; });
+}
+var unit = (arguments[0] || '').trim();
+var mode = arguments[1];
+var idx = arguments[2];
+if (mode === 'count') return cands(unit).length;
+var list = cands(unit);
+if (idx >= list.length) return false;
+list[idx].click();
+return true;
+"""
+
+# 真的失敗時才 dump:那一列的 HTML。讀了它就能寫出精準的點法，
+# 不必再靠「找文字相符的元素」這種瞎猜（2026-08-12 的教訓）。
+_UNIT_HTML_JS = r"""
+var el = document.querySelector('input[id^="ct-etAnnoGroup-"]');
+if (!el) return '';
+var box = el;
+for (var i = 0; i < 3 && box.parentElement; i++) box = box.parentElement;
+return box.outerHTML.replace(/\s+/g, ' ');
+"""
+
+_UNIT_OPEN_JS = r"""
+var el = document.querySelector('input[id^="ct-etAnnoGroup-"]');
+if (!el) return false;
+try { el.scrollIntoView({block: 'center'}); } catch (e) {}
+el.focus();
+el.click();
+return true;
+"""
+
+
+def _js(driver, script, *args):
+    try:
+        return driver.execute_script(script, *args)
+    except Exception as e:
+        print(f"[post_web_batch] 操作發布單位時出錯:{type(e).__name__}: {e}")
+        return None
+
 
 def read_publish_unit(driver):
     """讀「發布單位」現在實際是什麼。回 dict 或 None（讀不到）。
 
-    `{'value': 顯示的字, 'hidden': 送出去的群組 id, 'id': 那個 input 的 id}`
+    `{'value': 顯示的字, 'hidden': 旁邊那個 hidden 的值, 'id': 那個 input 的 id}`
+
+    ⚠️ `hidden` **只印出來參考，不當判斷依據**。當初以為它是送出去的群組 id，
+    但那是猜的（那一列附近不只一個 hidden，也可能是別的欄位的）。
+    拿沒證實的東西當閘門，最後會變成「明明選對了卻整批不給貼」。
+    真正證實過的判斷是**那個 input 的值要等於要的單位** —— 2026-08-12 實跑時它
+    停在「圖書館」，而貼出去的公告就真的掛成圖書館。
     """
-    try:
-        return driver.execute_script(_UNIT_READ_JS)
-    except Exception as e:
-        print(f"[post_web_batch] 讀發布單位時出錯:{type(e).__name__}: {e}")
-        return None
+    return _js(driver, _UNIT_READ_JS)
+
+
+def open_unit_dropdown(driver):
+    """點那個 input 把下拉叫出來。"""
+    return bool(_js(driver, _UNIT_OPEN_JS))
+
+
+def unit_option_count(driver, unit):
+    """畫面上「看得見、可以點、文字剛好是這個單位」的候選有幾個。"""
+    return int(_js(driver, _UNIT_CANDS_JS, unit, "count", 0) or 0)
+
+
+def click_unit_option(driver, unit, idx):
+    """點第 idx 個候選。回是否點到。"""
+    return bool(_js(driver, _UNIT_CANDS_JS, unit, "click", idx))
 
 
 @contextlib.contextmanager
@@ -373,57 +460,83 @@ def verified_publish_unit(tries=3, wait=1.5):
 
     為什麼要這道（2026-08-12 實跑證據）:當天貼三篇，校網「單位」欄兩篇對、
     **一篇是圖書館**，而 log 上兩筆都印 `OK:發布單位(自訂下拉)已選「資訊媒體組」`
-    —— **那個 OK 是假的**。同一批第 1 筆失敗、第 2 筆成功，是時間差
-    （原本那支點開下拉只等 0.8 秒，然後在**整份 document** 裡找文字相符的元素點下去）。
+    —— **那個 OK 是假的**。同日第二次實跑（4 筆）第 1 筆就被這道擋下，診斷讀到
+    `input[id^=ct-etAnnoGroup-]` 停在「圖書館」，而那一列的容器裡**另有**一個文字
+    是「資訊媒體組」的元素 —— 也就是原本那支點到的不是下拉選項。它在**整份
+    document** 裡找文字相符的元素就點，於是看不見的元素、甚至圖書館那頁側邊選單的
+    `<a href="info">資訊媒體組</a>` 都算（後者點下去會離開表單）。
+
+    流程:原本那支跑完 → 讀回來 → 對了就放行;不對就**自己點**（點那個 input 開下拉，
+    逐個「看得見、非導覽連結」的候選點下去，**每點一次就讀回來驗**）。
 
     做法刻意保守:
-      · **不自己塞值** —— hidden 那個群組 id 塞不進去，塞了只是文字好看（見上面）。
-        要重試就重試原本那支，讓它自己去點。
+      · **驗證是唯一的閘門** —— 候選挑錯只是白點一次，不會貼錯。所以候選寧可寬。
+      · **不自己塞值** —— 直接改 input 的字只會讓畫面好看（該欄位背後還有站台自己的
+        狀態），一定要讓站台的 JS 自己跑過。
       · **只在「證明是錯的」時候擋** —— 讀不到那個欄位（例如站台改版換了 id）
         一律放行並大聲警告。假警告會讓真警告一起被當成裝飾（坑 #13）;
         而這道擋下去的代價是整批停下，不能靠猜。
       · 擋下的方式是回 False —— `_submit_announcement` 會印 STOP banner 不發佈，
         `run()` 逐筆失敗即中止，結束碼 1。**寧可不貼，也不要貼成別的單位。**
+      · 真的失敗才 dump 診斷（含那一列的 HTML），而且**分段印** ——
+        一行印到底會被截掉，2026-08-12 就剛好截在最需要的那一段。
     """
-    import time
     from document_closure import document_closure_post_web as pw
     real = pw._select_publish_unit
 
     def patched(driver, unit):
-        ok = real(driver, unit)
-        for n in range(1, tries + 1):
+        def now():
             st = read_publish_unit(driver)
-            if st is None:
-                print(f"[post_web_batch] ⚠️ 讀不到發布單位欄位"
-                      f"（找不到 id 開頭 {UNIT_INPUT_PREFIX} 的欄位，站台可能改版）"
-                      f"—— 這一筆的單位**沒辦法確認**，照原本的結果繼續。"
-                      f"貼完請自己去校網看那筆的「單位」欄。")
-                return ok
-            got = (st.get("value") or "").strip()
-            if got == unit and (st.get("hidden") or "").strip():
-                if n > 1:
-                    print(f"[post_web_batch] ✓ 發布單位第 {n} 次才設定成功:{got}")
-                else:
-                    print(f"[post_web_batch] ✓ 發布單位讀回來確認:{got}")
-                return True
-            why = (f"還是「{got or '空的'}」" if got != unit
-                   else "文字對了但群組 id 是空的（等於沒選到）")
-            print(f"[post_web_batch] ⚠️ 發布單位{why} —— "
-                  f"原本那支回報{'成功' if ok else '失敗'}，實際沒設進去。"
-                  f"（第 {n}/{tries} 次）")
-            if n < tries:
-                time.sleep(wait)
-                ok = real(driver, unit)
-        st = read_publish_unit(driver) or {}
-        print(f"[post_web_batch] ⛔ 發布單位設不進去（現在是"
-              f"「{(st.get('value') or '空的').strip()}」，要的是「{unit}」）"
-              f"—— 這一筆**不發佈**。")
+            return None if st is None else (st.get("value") or "").strip()
+
+        real(driver, unit)
+        got = now()
+        if got is None:
+            print(f"[post_web_batch] ⚠️ 讀不到發布單位欄位"
+                  f"（找不到 id 開頭 {UNIT_INPUT_PREFIX} 的欄位，站台可能改版）"
+                  f"—— 這一筆的單位**沒辦法確認**，照原本的結果繼續。"
+                  f"貼完請自己去校網看那筆的「單位」欄。")
+            return True
+        if got == unit:
+            print(f"[post_web_batch] ✓ 發布單位讀回來確認:{got}")
+            return True
+
+        # 原本那支沒設進去（它會回報成功，見 docstring）。自己來:點那個 input
+        # 把下拉叫出來，逐個「看得見的候選」點下去，**每點一次就讀回來驗**。
+        # 驗證是唯一的閘門 —— 所以就算候選挑錯了也只是白點一次，不會貼錯。
+        print(f"[post_web_batch] ⚠️ 發布單位還是「{got or '空的'}」"
+              f"（原本那支回報成功，實際沒設進去）—— 自己重點一次。")
+        for n in range(1, tries + 1):
+            if not open_unit_dropdown(driver):
+                break
+            time.sleep(0.6)
+            total = unit_option_count(driver, unit)
+            print(f"[post_web_batch]    第 {n}/{tries} 輪:看得見的「{unit}」"
+                  f"候選 {total} 個")
+            for i in range(min(total, 6)):
+                if not click_unit_option(driver, unit, i):
+                    continue
+                time.sleep(0.4)
+                if now() == unit:
+                    print(f"[post_web_batch] ✓ 發布單位設定成功"
+                          f"（第 {n} 輪、第 {i + 1} 個候選）:{unit}")
+                    return True
+            time.sleep(wait)
+
+        print(f"[post_web_batch] ⛔ 發布單位設不進去（現在是「{now() or '空的'}」，"
+              f"要的是「{unit}」）—— 這一筆**不發佈**。")
         print(f"[post_web_batch]    沒選單位的公告會被校網掛成該頁所屬單位"
               f"（圖書館），寧可不貼也不要掛錯單位。")
+        # 失敗才 dump，而且分段印 —— 一行印到底會被截掉（2026-08-12 就被截在
+        # leaves 中間，最需要的那段剛好沒看到）。
         try:
-            print("[post_web_batch][診斷] 發布單位實況 "
-                  + json.dumps(driver.execute_script(_UNIT_STATE_JS, unit),
-                               ensure_ascii=False)[:1200])
+            st = driver.execute_script(_UNIT_STATE_JS, unit)
+            raw = json.dumps(st, ensure_ascii=False)
+            for i in range(0, min(len(raw), 4000), 800):
+                print(f"[post_web_batch][診斷{i // 800 + 1}] {raw[i:i + 800]}")
+            html = driver.execute_script(_UNIT_HTML_JS) or ""
+            for i in range(0, min(len(html), 3200), 800):
+                print(f"[post_web_batch][診斷HTML{i // 800 + 1}] {html[i:i + 800]}")
         except Exception:
             pass
         return False
