@@ -258,14 +258,16 @@ def test_stop_route_covers_every_job(srv):
 
 
 def test_jobs_share_one_lock():
-    """五支工作互斥,而且全部登記在 JOBS。
+    """六支工作互斥,而且全部登記在 JOBS。
 
     前四支是搶同一個 Chrome。產公告文案不碰 Chrome，但它跟收文一樣會寫桌面那份
     審核表 —— 兩支同時 load→save 同一個 xlsx，先存的那邊直接消失。
+    張貼自己開一個 Chrome（同一個 Selenium 設定檔），照樣不能跟別支並行。
     沒登記在 JOBS 的話，/api/<工作>/status 與 /stop 兩條泛用路由就管不到它，
     畫面上會看不到進度、也按不了停止。
     """
-    assert {ui.PREP, ui.SEND, ui.SCAN, ui.ARCH, ui.ANNC} == set(ui.JOBS.values())
+    assert {ui.PREP, ui.SEND, ui.SCAN, ui.ARCH, ui.ANNC, ui.WEB} \
+        == set(ui.JOBS.values())
 
 
 # ── 浮窗 ───────────────────────────────────────────────────────────────────

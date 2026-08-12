@@ -154,6 +154,77 @@ def test_run_refuses_when_list_changed(env, monkeypatch):
     assert pwb.run(["MWAA0002"], sheet) == (0, 0)
 
 
+def test_run_refuses_when_content_changed(env, monkeypatch):
+    """文號一樣、**文案被換掉了** → 一筆都不貼。
+
+    2026-08-12 審出來的洞:原本只比文號。確認框開著的時候有人在 Excel 動了
+    「公告」欄（或另一邊剛跑完產文案），貼出去的就不是他看過的字 ——
+    而這是唯一對外的動作。
+    """
+    work, sheet = env
+    _doc(work, "MWAA0001")
+    rs.upsert({"文號": "MWAA0001", "公告": TEXT, "張貼": "OK"}, path=sheet)
+    monkeypatch.setattr(
+        "post_web_review._launch_bare_chrome",
+        lambda: pytest.fail("內容對不上就不該開 Chrome"))
+    assert pwb.run(["MWAA0001:0000000000"], sheet) == (0, 0)
+
+
+def test_fingerprint_follows_the_words(env):
+    """指紋要跟著標題／內文／分類／附件動，文號變不變不影響它。"""
+    work, sheet = env
+    _doc(work, "MWAA0001")
+    rs.upsert({"文號": "MWAA0001", "公告": TEXT, "張貼": "OK"}, path=sheet)
+    before = pwb.fingerprint(pwb.plan(sheet)[0][0])
+    rs.upsert({"文號": "MWAA0001", "公告": TEXT + "（改了一句）"},
+              path=sheet, overwrite=True)
+    after = pwb.fingerprint(pwb.plan(sheet)[0][0])
+    assert before and after and before != after
+    # UI 拿到的是 _slim 的結果 —— 指紋要在裡面，不然畫面沒東西可帶回來。
+    assert pwb._slim(pwb.plan(sheet)[0][0])["指紋"] == after
+
+
+def test_failed_post_exits_nonzero(env, monkeypatch):
+    """沒貼完一定要用非 0 結束碼離開。
+
+    UI 判斷成敗只看結束碼(0 → 寫「張貼結束」、3 秒自動收起面板、報成功)。
+    陳核與存查失敗都 SystemExit(1)，張貼原本沒有 —— 於是「一筆都沒貼」跟
+    「全部貼完」在畫面上長得一模一樣，而這是唯一對外的動作。
+    """
+    work, sheet = env
+    _doc(work, "MWAA0001")
+    rs.upsert({"文號": "MWAA0001", "公告": TEXT, "張貼": "OK"}, path=sheet)
+    monkeypatch.setattr(sys, "argv",
+                        ["post_web_batch.py", "--go", "--expect=MWAA0001",
+                         "--path", sheet])
+    monkeypatch.setattr(pwb, "run", lambda *a, **k: (0, 1))     # 一筆都沒貼成功
+    with pytest.raises(SystemExit) as e:
+        pwb.main()
+    assert e.value.code == 1
+
+    monkeypatch.setattr(pwb, "run", lambda *a, **k: (0, 0))     # 被關卡擋下
+    with pytest.raises(SystemExit) as e:
+        pwb.main()
+    assert e.value.code == 1
+
+
+def test_full_success_exits_zero(env, monkeypatch):
+    work, sheet = env
+    _doc(work, "MWAA0001")
+    rs.upsert({"文號": "MWAA0001", "公告": TEXT, "張貼": "OK"}, path=sheet)
+    monkeypatch.setattr(sys, "argv",
+                        ["post_web_batch.py", "--go", "--expect=MWAA0001",
+                         "--path", sheet])
+    monkeypatch.setattr(pwb, "run", lambda *a, **k: (2, 2))
+    pwb.main()                                  # 不該拋 SystemExit
+
+
+def test_parse_expect_allows_bare_doc_no():
+    """手動跑 CLI 時只打文號也要能用（那種就只比清單、不比內容）。"""
+    assert pwb.parse_expect(["MWAA0001", "MWAA0002:abc123"]) == {
+        "MWAA0001": None, "MWAA0002": "abc123"}
+
+
 def test_go_requires_expect(monkeypatch, capsys):
     """`--go` 不帶 `--expect` 直接拒絕 —— 這是唯一對外的動作。"""
     monkeypatch.setattr(sys, "argv", ["post_web_batch.py", "--go"])

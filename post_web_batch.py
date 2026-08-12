@@ -71,6 +71,43 @@ def _doc_dir(doc_no):
     return None
 
 
+# ── 開跑前的環境檢查 ───────────────────────────────────────────────────────
+
+DEVTOOLS_LIST = "http://127.0.0.1:9222/json/list"
+
+
+def chrome_in_the_way():
+    """收文開的那個 Chrome 還開著就先別貼。回說明字串;沒問題回 None。
+
+    這條路對 Chrome 的要求跟陳核／存查**正好相反**。那兩支是 attach 進「已經
+    登入好的」edoc Chrome，所以要求它開著;張貼完全不碰 edoc，是自己開一個新的
+    （`post_web_review._launch_bare_chrome`）—— 而兩邊用的是**同一個 Selenium
+    設定檔、同一個 9222 埠**（`taipeion_login_selenium._build_chrome_options`:
+    `--user-data-dir=…\\Chrome-Selenium` ＋ `--remote-debugging-port=9222`）。
+    同一個設定檔被兩個 Chrome 佔住時只有兩種結果，都不是我們要的:
+
+      · 新開的 chrome.exe 把命令交給既有的實例就自己退場 → chromedriver 接到的
+        是**收文那個 Chrome**，於是把 edoc 那個視窗開去校網，收尾的
+        `driver.quit()` 還會把它整個關掉。
+      · 或者 chromedriver 等不到瀏覽器，直接拋 WebDriverException（一片英文）。
+
+    原作者那條路不會撞到:`main.py` 一被 import 就 `_close_selenium_chrome_only()`
+    把 Selenium Chrome 殺掉，才輪到 `main.py 5` 開乾淨的。這裡**故意不照做** ——
+    那個 Chrome 裡有插卡登入好的 edoc session，重建要插卡、輸 PIN、還要過雙因子
+    （交接檔坑 #20 卡了整個上午）。所以只擋下來把話講清楚，關不關由人決定。
+    """
+    import urllib.request
+    try:
+        with urllib.request.urlopen(DEVTOOLS_LIST, timeout=1.5):
+            pass
+    except Exception:
+        return None
+    return ("收新公文開的那個 Chrome 還開著（127.0.0.1:9222）。張貼會自己開一個新的"
+            "Chrome，跟它用同一個 Selenium 設定檔 —— 兩個一起開會互相搶，可能反而"
+            "把 edoc 那個視窗開去校網，收尾時再把它關掉。請先把那個 Chrome 關掉"
+            "再貼。（陳核／存查要它開著，張貼相反 —— 張貼不碰 edoc、不用插卡。）")
+
+
 # ── 判定 ───────────────────────────────────────────────────────────────────
 
 def evaluate(row):
@@ -87,7 +124,8 @@ def evaluate(row):
     title, body = split_announcement(text)
     d = _doc_dir(no)
     out = {"文號": no, "主旨": row.get("主旨") or "", "目錄": d or "",
-           "標題": title, "內文": body, "分類": [], "擋下原因": None}
+           "標題": title, "內文": body, "分類": [], "附件": [],
+           "擋下原因": None}
 
     def stop(why):
         out["擋下原因"] = why
@@ -112,6 +150,52 @@ def evaluate(row):
     if _already_announced(d):
         return stop("已經公告過了（資料夾有 *已公告.txt，或清冊裡already有）")
     out["分類"] = (summary or {}).get("sync_categories") or []
+    # 附件名稱會**出現在校網上**（家長看得到的就是這幾個檔名），所以預覽就要
+    # 看得到「實際會傳哪幾個」。判定不另立標準:承辦人在摘要頁勾過的話，
+    # `_find_attachments` 自己會讀那份「附件選擇.json」以他的勾選為準，
+    # 這裡只是把同一支算出來的答案印出來。
+    # 只在其他關卡都過了才算 —— 那支會走整個目錄還讀檔算雜湊，貼不出去的
+    # 沒必要花這個時間（清單一次算幾十筆）。
+    from document_closure.document_closure_post_web import _find_attachments
+    try:
+        out["附件"] = [os.path.basename(p) for p in _find_attachments(d)]
+    except Exception as e:
+        print(f"[post_web_batch] {no} 附件列不出來（不影響貼出去的內容）:"
+              f"{type(e).__name__}: {e}")
+    return out
+
+
+def fingerprint(it):
+    """把「承辦人確認過的東西」壓成一個短字串:標題＋內文＋分類＋附件。
+
+    2026-08-12 審出來的洞:送出前**只比文號**。文號一樣、文案被換掉了，比對照樣
+    過關 —— 而他在確認框裡看的是那幾百字，不是那 14 個字元。最現實的情境:
+    確認框開著的時候有人在 Excel 動了「公告」欄，或另一邊剛跑完產文案。
+    **這是唯一對外的動作**，貼出去的字一定要是他看過的那份。
+
+    只取前 10 碼:這不是防篡改，是防「畫面過期」，夠短才塞得進 `--expect`。
+    """
+    import hashlib
+    raw = "\n".join([str(it.get("標題") or ""), str(it.get("內文") or ""),
+                     "+".join(it.get("分類") or []),
+                     "|".join(it.get("附件") or [])])
+    return hashlib.sha1(raw.encode("utf-8")).hexdigest()[:10]
+
+
+def parse_expect(expect):
+    """`--expect` 拆成 {文號: 指紋 or None}。
+
+    允許只給文號（手動跑 CLI 時打得出來），那種就只比清單、不比內容。
+    介面一律會帶指紋。
+    """
+    out = {}
+    for s in expect or []:
+        s = str(s).strip()
+        if not s:
+            continue
+        no, _, mark = s.partition(":")
+        if no.strip():
+            out[no.strip()] = mark.strip() or None
     return out
 
 
@@ -197,15 +281,25 @@ def sssh_heading_style(align=None, size=None):
 def run(expect, path=None):
     """真的貼上校網。回 (成功數, 總數)。
 
-    `expect` — 畫面上看到的那幾筆文號。**動手前自己再算一次**，跟它比對:
-    介面那道只擋得住畫面過期，擋不住這半秒內審核表又被改了。
+    `expect` — 畫面上看到的那幾筆，每筆是 `文號` 或 `文號:指紋`。
+    **動手前自己再算一次**，跟它比對:介面那道只擋得住畫面過期，擋不住這半秒內
+    審核表又被改了。帶了指紋就連**內容**一起比 —— 只比文號的話，文案被換掉
+    照樣會貼出去（見 `fingerprint`）。
     逐筆失敗即中止 —— 跟陳核、存查同一條規矩。
     """
     ready, _, _, warn = plan(path)
-    now = [it["文號"] for it in ready]
-    if sorted(now) != sorted(expect):
-        print(f"[post_web_batch] ⛔ 清單變了（你看到 {len(expect)} 筆，"
+    want = parse_expect(expect)
+    now = {it["文號"]: fingerprint(it) for it in ready}
+    if sorted(now) != sorted(want):
+        print(f"[post_web_batch] ⛔ 清單變了（你看到 {len(want)} 筆，"
               f"現在算出來 {len(now)} 筆）—— 什麼都沒貼，請重新整理再確認。")
+        return 0, 0
+    changed = sorted(no for no, mark in want.items() if mark and now[no] != mark)
+    if changed:
+        print(f"[post_web_batch] ⛔ 這幾筆的文案跟你確認過的不一樣了:"
+              f"{'、'.join(changed)}")
+        print("[post_web_batch]    （公告欄被改過，或剛剛重產過）"
+              "—— 什麼都沒貼，請重新整理、再看一次要貼的字。")
         return 0, 0
     if warn:
         for w in warn:
@@ -213,6 +307,12 @@ def run(expect, path=None):
         return 0, 0
     if not ready:
         print("[post_web_batch] 沒有要貼的公文。")
+        return 0, 0
+    # 在開 Chrome **之前**擋 —— 這一道要是漏了，最壞的下場是把收文那個
+    # 已經登入好的 edoc Chrome 開去校網，然後收尾把它關掉。
+    busy = chrome_in_the_way()
+    if busy:
+        print(f"[post_web_batch] ⛔ {busy}")
         return 0, 0
 
     texts = {}
@@ -253,7 +353,15 @@ def run(expect, path=None):
 # ── CLI ───────────────────────────────────────────────────────────────────
 
 def _slim(it):
-    return {k: it[k] for k in ("文號", "主旨", "標題", "分類", "擋下原因", "目錄")}
+    """給 UI 用的欄位。**內文要一起帶** —— 張貼頁核對的對象是「全校會看到的
+    那幾百字」，不是一行主旨，只給標題等於讓人閉著眼睛按確定。
+
+    順便附上指紋:畫面按下確定時把它帶回來，兩邊才能確認「要貼的字沒被換過」。
+    """
+    out = {k: it[k] for k in ("文號", "主旨", "標題", "分類", "附件",
+                              "內文", "擋下原因", "目錄")}
+    out["指紋"] = fingerprint(it)
+    return out
 
 
 def main():
@@ -274,12 +382,28 @@ def main():
              "警告": warn}, ensure_ascii=False))
         return
 
+    if not a.go:
+        # 預覽也講 Chrome 的事:直接跑 CLI 的人同樣會撞到，而且症狀（一片英文，
+        # 或者莫名把 edoc 那個視窗開走）完全看不出根因。
+        busy = chrome_in_the_way()
+        if busy:
+            warn = [*warn, busy]
+
     if a.go:
         if not a.expect:
             print("[post_web_batch] --go 一定要帶 --expect=<文號清單> ——")
             print("[post_web_batch] 這是唯一對外的動作，不接受「就照你算的貼」。")
             raise SystemExit(2)
-        run([s.strip() for s in a.expect.split(",") if s.strip()], a.path)
+        ok, total = run([s.strip() for s in a.expect.split(",") if s.strip()],
+                        a.path)
+        # **沒貼完一定要用非 0 結束碼離開。** UI 判斷成敗只看結束碼
+        # （`tick()`:0 → 寫「張貼結束」、3 秒自動收起面板、報成功）。
+        # 陳核（post_draft_batch）與存查（archive_batch）失敗都 SystemExit(1)，
+        # 原本只有這支沒有 —— 於是「一筆都沒貼」跟「全部貼完」在畫面上長得
+        # 一模一樣，而這是唯一對外的動作，最不能讓人誤以為做完了。
+        # 同坑 #13、#19 的家族:不要讓畫面自己收起來去替人宣告成功。
+        if not total or ok != total:
+            raise SystemExit(1)
         return
 
     for w in warn:
@@ -288,6 +412,7 @@ def main():
     for it in ready:
         print(f"  - {it['文號']}  {it['標題'][:44]}")
         print(f"      分類:{'+'.join(it['分類']) or '(無)'}　內文 {len(it['內文'])} 字")
+        print(f"      附件:{'、'.join(it['附件']) or '(無)'}")
     print(f"\n【勾了要貼，但貼不出去】{len(blocked)} 筆")
     for it in blocked:
         print(f"  - {it['文號']}  {it['擋下原因']}")

@@ -24,6 +24,12 @@ ui.py
               不用讀卡機。文案可以直接改，改完自動存回審核表「公告」欄。
               唯一的破壞性動作是「重產」（會蓋掉你改過的字），所以那顆是逐筆、
               而且要再確認一次。判定交給 announce_doc.plan()。
+  **張貼頁**  ⚠️ 這一頁**會真的貼上校網**（呼叫 post_web_batch.py --go），
+              而那是全站**唯一真的對外**的動作 —— 貼出去全校師生家長都看得到。
+              形狀照陳核頁（三堆＋二段確認），判定交給 post_web_batch.plan()。
+              ⚠️ 它對 Chrome 的要求跟陳核／存查**相反**:那兩頁要收文開的 Chrome
+              開著，張貼要它**關掉**（張貼自己開一個新的，兩邊同一個 Selenium
+              設定檔，見 post_web_batch.chrome_in_the_way）。
 """
 
 import json
@@ -499,6 +505,53 @@ def announce_payload(sent_only=True):
             "只看已陳核": bool(sent_only)}, note
 
 
+# ── 張貼頁 ─────────────────────────────────────────────────────────────────
+#
+# **全站唯一真的對外的動作。** 陳核送錯還在校內、歸檔歸錯是找 admin 的事，
+# 貼錯是全校師生家長都看到了（可事後刪，但已經被看到就是被看到了）。
+# 2026-07-28 出事的正是這一步:`main.py 3` 歸完檔自動貼校網，沒有人工確認。
+#
+# 形狀照**陳核頁**（會貼／擋下／待辦 三堆 ＋ 二段確認），**不照存查頁** ——
+# 存查那頁「順序是資訊」是因為 process_document_closure 只做清單第一筆，
+# 張貼沒有這回事，逐筆各自獨立。
+#
+# 判定一律吃 post_web_batch.plan()，介面不另立標準（同陳核頁的理由:兩套規則
+# 遲早分岔，而最壞的方向是「畫面說會擋、其實貼出去了」）。
+#
+# ⚠️ Chrome 的要求跟陳核／存查**相反**。那兩頁 attach 收文開的那個 Chrome，
+# 所以要它開著;張貼不碰 edoc，是自己開一個新的，而兩邊用同一個 Selenium 設定檔
+# ＋同一個 9222 埠 —— 所以這一頁要它**關掉**。定義只寫在
+# post_web_batch.chrome_in_the_way() 一處，那支動手前也會自己再檢查一次。
+
+def web_payload():
+    """張貼頁的清單。回 (dict, 提醒字串 or None)。
+
+    分三堆，跟陳核頁同一組意思:
+      可貼 —— 「張貼」欄已 OK 且判定過關。按下去就是貼這幾筆。
+      擋下 —— 「張貼」欄已 OK 但貼不出去（公告欄空的、文案有待查核網址、
+               已經貼過…）。
+      候選 —— 還沒 OK 的。順手把「就算勾了也貼不出去」先算好標紅。
+    """
+    import post_web_batch as pwb
+    note = None
+    try:
+        rs.sync()
+    except PermissionError:
+        note = "公告彙整.xlsx 正被 Excel 開著，勾選會存不進去（先關掉 Excel）"
+    except Exception as e:
+        note = f"同步時出錯:{type(e).__name__}: {e}"
+
+    ready, blocked, cand, warn = pwb.plan()
+    busy = pwb.chrome_in_the_way()
+    return {"可貼": [pwb._slim(i) for i in ready],
+            "擋下": [pwb._slim(i) for i in blocked],
+            "候選": [pwb._slim(i) for i in cand],
+            "警告": warn,
+            # 這盞燈跟陳核／存查那盞（chrome_state）**不是同一件事**，
+            # 條件正好相反 —— 不要共用，共用就一定有一頁是錯的。
+            "chrome": {"ok": busy is None, "說明": busy}}, note
+
+
 # ── 備料（呼叫 py main.py 4）────────────────────────────────────────────────
 #
 # 用 subprocess 跑，**完全不改系管師的程式碼** —— 呼叫不等於修改。
@@ -624,10 +677,16 @@ ARCH = Job("結案存查", ["archive_batch.py", "--go"],
 # 同一個 xlsx 會互相蓋掉，先存的那邊直接消失。
 # argv 每次按下去前重寫（要帶 --only=<畫面上那幾筆>，**絕不用 --limit**）。
 ANNC = Job("產生公告文案", ["announce_doc.py"])
+# 貼上校網。**唯一真的對外**的一支。argv 每次按送出前重寫（要帶 --expect）。
+# 開浮窗:它會自己開一個 Chrome 去填校網的表單，那段不能動滑鼠。
+# 但浮窗的字只講該講的 —— 這一段**不碰 edoc、不用插卡、螢幕鎖不鎖無所謂**，
+# 多寫一句假的警告會讓真的警告也被當成裝飾（坑 #13）。
+WEB = Job("貼上校網", ["post_web_batch.py", "--go"],
+          hud="web", hud_label="貼上校網中…請不要動滑鼠")
 
 # 進度面板／停止鈕共用同一組路由。名字就是網址裡的那一段:/api/<名字>/status。
 JOBS = {"prep": PREP, "send": SEND, "scan": SCAN, "archive": ARCH,
-        "announce": ANNC}
+        "announce": ANNC, "web": WEB}
 
 
 # ── HTTP ───────────────────────────────────────────────────────────────────
@@ -693,6 +752,15 @@ class Handler(BaseHTTPRequestHandler):
             sent = (q.get("sent") or ["1"])[0] != "0"
             try:
                 data, note = announce_payload(sent_only=sent)
+                return self._json({"ok": True, **data, "訊息": note})
+            except FileNotFoundError:
+                return self._json({"ok": False,
+                                   "錯誤": "還沒有任何公文。請先按「收新公文」。"})
+            except Exception as e:
+                return self._json({"ok": False, "錯誤": f"{type(e).__name__}: {e}"})
+        if path == "/api/web/plan":
+            try:
+                data, note = web_payload()
                 return self._json({"ok": True, **data, "訊息": note})
             except FileNotFoundError:
                 return self._json({"ok": False,
@@ -861,6 +929,63 @@ class Handler(BaseHTTPRequestHandler):
                          + (["--sent-only"] if sent_only else [])
                          + ["--only", *now])
             ok, err = ANNC.start()
+            return self._json({"ok": ok, "錯誤": err} if not ok
+                              else {"ok": True, "筆數": len(now)})
+
+        if path == "/api/web/start":
+            # **唯一真的對外的入口。** 貼出去全校師生家長都看得到，所以五道關卡:
+            #
+            #  1. 沒帶「確認」一律不動 —— 誰誤 POST 到這個位址都不會貼出東西。
+            #  2. 畫面看到的那幾筆要跟現算的完全一樣。
+            #  3. **那幾筆的內容也要跟他確認過的一樣**（比 post_web_batch 算的
+            #     指紋:標題＋內文＋分類＋附件）。只比文號擋不住「文案被換掉」——
+            #     文號一樣、字全變了照樣過關，而他確認的是那幾百字。2026-08-12
+            #     審出來的洞。沒帶指紋也不放行:那代表畫面是舊版本，寧可重看一次。
+            #  4. plan() 的警告沒清掉不放行（例如缺 sssh_publish_unit）——
+            #     跑下去會在發佈那步停住，而那時 Chrome 已經開了、校網也登入了。
+            #  5. 收文那個 Chrome 還開著就不放行。**跟陳核／存查相反**，
+            #     理由見 post_web_batch.chrome_in_the_way()。
+            #
+            # 動手的那支還會自己再算一次（含指紋）跟 --expect 比對，也自己再檢查
+            # 一次 Chrome —— 這裡這幾道只擋得住「畫面過期」。
+            if not body.get("確認"):
+                return self._json({"ok": False, "錯誤": "缺少確認"}, 400)
+            seen = [str(x).strip() for x in (body.get("文號") or [])]
+            if not seen:
+                return self._json({"ok": False, "錯誤": "沒有要貼的公文"})
+            try:
+                import post_web_batch as pwb
+                ready, _, _, warn = pwb.plan()
+            except FileNotFoundError:
+                return self._json({"ok": False,
+                                   "錯誤": "還沒有任何公文。請先按「收新公文」。"})
+            except Exception as e:
+                return self._json({"ok": False, "錯誤": f"{type(e).__name__}: {e}"})
+            now = {it["文號"]: pwb.fingerprint(it) for it in ready}
+            if sorted(seen) != sorted(now):
+                return self._json({"ok": False,
+                                   "錯誤": f"清單變了（你看到 {len(seen)} 筆，現在是 "
+                                           f"{len(now)} 筆）—— 為安全起見沒有貼出去，"
+                                           f"請按「重新整理」再確認一次。"})
+            marks = body.get("指紋") or {}
+            bad = sorted(no for no in now
+                         if str(marks.get(no) or "") != now[no])
+            if bad:
+                return self._json({
+                    "ok": False,
+                    "錯誤": f"這幾筆要貼的字跟你剛才確認的不一樣了:{'、'.join(bad)}"
+                            f"（公告欄被改過，或剛剛重產過，也可能是這個畫面太舊）"
+                            f"—— 為安全起見沒有貼出去，請按「重新整理」再看一次。"})
+            if warn:
+                return self._json({"ok": False, "錯誤": warn[0]})
+            busy = pwb.chrome_in_the_way()
+            if busy:
+                return self._json({"ok": False, "錯誤": busy})
+            # 帶下去的是「文號:指紋」—— 那支動手前會自己再算一次比對。
+            WEB.argv = ["post_web_batch.py", "--go",
+                        "--expect=" + ",".join(f"{no}:{now[no]}"
+                                               for no in sorted(now))]
+            ok, err = WEB.start()
             return self._json({"ok": ok, "錯誤": err} if not ok
                               else {"ok": True, "筆數": len(now)})
 

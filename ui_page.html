@@ -149,13 +149,28 @@
   details.skip summary{cursor:pointer;color:#555}
   details.skip b{color:var(--th)}
   details.skip .li{color:var(--sub);font-size:12px;padding:2px 0 2px 18px}
+  /* ── 張貼頁 ───────────────────────────────────────────────────────────
+     全站唯一**真的對外**的動作。要核對的東西跟其他頁不一樣:陳核核對的是兩行
+     字、存查核對的是一個 8 位檔號，張貼核對的是**全校師生家長會讀到的那幾百字**
+     ——所以整篇要攤開來看得完，而且要用讀得下去的字體（承辦人的標準是「讀者
+     讀不讀得下去」），不套 .stxt 那種等寬核對字。 */
+  .wbody{margin:7px 0 0;padding:10px 13px;background:#fff;border:1px solid var(--line);
+         border-radius:6px;font-size:13.5px;line-height:1.9;white-space:pre-wrap;
+         max-height:290px;overflow-y:auto}
+  /* 標題與分類、附件是「填進校網表單的欄位」,那才是核對用的等寬區塊。
+     附件名稱一樣會出現在校網上,所以列出來 —— 家長看到的就是這幾個檔名。 */
+  .wmeta{margin:7px 0 0;padding:8px 10px;background:#fff;border:1px solid var(--line);
+         border-radius:6px;font-family:Consolas,"Microsoft JhengHei",monospace;
+         font-size:13px;line-height:1.8}
+  .wmeta b{color:var(--th)}
+  .wmeta .lbl{color:var(--sub);font-weight:400}
 </style>
 
 <div class="tabs">
   <div class="on" id="tablive">摘要</div><div class="click" id="tabsend">陳核</div>
   <div class="click" id="tabarch">存查</div>
   <div class="click" id="tabanc">公告</div>
-  <div class="soon">張貼</div><div class="click" id="tabold">舊文</div>
+  <div class="click" id="tabweb">張貼</div><div class="click" id="tabold">舊文</div>
   <div class="soon">設定</div>
 </div>
 
@@ -170,6 +185,7 @@
        「送去陳核」—— 在送出收不回來的頁面上，主動作不能藏在視線外。 -->
   <button id="dosendtop" class="risk" hidden></button>
   <button id="doarchtop" class="risk" hidden></button>
+  <button id="dowebtop" class="risk" hidden></button>
   <button id="reload">重新整理</button>
 </div>
 
@@ -252,6 +268,24 @@
   </div>
 </div>
 
+<!-- 張貼的確認框。這是全站唯一真的對外的動作，所以對話框裡要看得到**整篇文案**
+     （不是只有標題）—— 貼出去就是全校師生家長讀到的東西。 -->
+<div id="webask" class="mask" hidden>
+  <div class="dlg wide">
+    <h2>確定要把這些公告貼上校網嗎？</h2>
+    <p class="danger"><b>貼出去全校師生家長都看得到。</b>
+      這是整套流程裡唯一真的對外的一步。貼錯可以事後刪，但<b>已經被看到就是被看到了</b>。
+      請最後看一次每一篇的標題、分類、附件，以及整篇內文。</p>
+    <div id="webitems"></div>
+    <p class="warnbox">程式會自己開一個 Chrome 登入校網填表單，<b>請不要動滑鼠鍵盤</b>。
+      這一段<b>不碰 edoc、不用插卡</b>。任何一筆出錯會整批停下來，已貼出的不會重貼。</p>
+    <div class="dlgfoot">
+      <button id="webno">再想想</button>
+      <button id="webyes" class="risk">確定貼上校網</button>
+    </div>
+  </div>
+</div>
+
 <div class="wrap">
   <div class="list" id="list"></div>
   <div class="detail" id="detail"><div class="empty">左邊點一筆公文。</div></div>
@@ -307,14 +341,15 @@ function drawList() {
     n.onclick = () => pick(view()[+n.dataset.i]));
 }
 
-const TITLE = { live: "摘要", old: "舊文", send: "陳核", arch: "存查", anc: "公告" };
-// 整批處理的分頁（陳核／存查／公告）看的是「整批會怎樣」而不是單筆,所以收掉
-// 左邊清單、右邊佔滿。
-const BATCH = (t) => t === "send" || t === "arch" || t === "anc";
+const TITLE = { live: "摘要", old: "舊文", send: "陳核", arch: "存查",
+                anc: "公告", web: "張貼" };
+// 整批處理的分頁（陳核／存查／公告／張貼）看的是「整批會怎樣」而不是單筆,所以
+// 收掉左邊清單、右邊佔滿。
+const BATCH = (t) => t === "send" || t === "arch" || t === "anc" || t === "web";
 
 function setTab(t) {
   TAB = t;
-  ["live", "old", "send", "arch", "anc"].forEach(k =>
+  ["live", "old", "send", "arch", "anc", "web"].forEach(k =>
     el("tab" + k).className = t === k ? "on" : "click");
   el("title").textContent = TITLE[t];
   // 換頁等於換清單,原本選的那筆多半不在新清單裡,右邊一併清掉免得對不上。
@@ -325,9 +360,11 @@ function setTab(t) {
   // 動作鈕只在自己那一頁出現 —— 留在別的分頁上是誤觸來源，而這兩顆都收不回來。
   el("dosendtop").hidden = true;
   el("doarchtop").hidden = true;
+  el("dowebtop").hidden = true;
   if (t === "send") return loadSend();
   if (t === "arch") return loadArch();
   if (t === "anc") return loadAnc();
+  if (t === "web") return loadWeb();
   el("detail").innerHTML = '<div class="empty">左邊點一筆公文。</div>';
   drawList();
 }
@@ -337,6 +374,7 @@ el("tabold").onclick = () => setTab("old");
 el("tabsend").onclick = () => setTab("send");
 el("tabarch").onclick = () => setTab("arch");
 el("tabanc").onclick = () => setTab("anc");
+el("tabweb").onclick = () => setTab("web");
 
 const KB = (n) => n >= 1048576 ? (n / 1048576).toFixed(1) + " MB"
                  : n >= 1024 ? Math.round(n / 1024) + " KB" : n + " B";
@@ -959,7 +997,159 @@ async function startAnc(docs, overwrite) {
   } catch (e) { say("連不上程式，是不是關掉了？", "err"); }
 }
 
-// ── 背景工作:收新公文 / 送陳核 / 讀清單 / 歸檔 / 產文案 ──────────────────
+// ── 張貼頁 ────────────────────────────────────────────────────────────────
+//
+// **全站唯一真的對外的動作。** 陳核送錯還在校內、歸檔歸錯是找 admin 的事，
+// 貼錯是全校師生家長都看到了。2026-07-28 出事的就是這一步（歸完檔自動貼校網、
+// 沒有人工確認）。所以這一頁是紅底，**不是公告頁那個綠底** —— 綠底的意思是
+// 「這一頁不會送出東西」，張貼正好相反。
+//
+// 形狀照**陳核頁**（會貼／擋下／待辦 三堆 ＋ 二段確認），不照存查頁:那頁的
+// 順序邏輯是「歸檔只做第一筆」造成的，張貼逐筆各自獨立，沒有這回事。
+//
+// 「加入張貼／這筆不貼」= 寫審核表的「張貼」欄（OK ↔ 空白），跟在 Excel 裡自己
+// 打 OK 是同一件事。承辦人 2026-08-11 的原話:「張貼要和陳核一樣，是我逐筆勾選，
+// 不能直接就跑」。
+//
+// 能不能貼**不在這裡判斷**，一律吃後端問 post_web_batch.plan() 的結果。
+let WEB = null;
+
+async function loadWeb() {
+  say("清單計算中…");
+  el("detail").innerHTML = '<div class="empty">計算中…</div>';
+  try {
+    const j = await (await fetch("/api/web/plan")).json();
+    if (!j.ok) {
+      el("detail").innerHTML = "";
+      el("dowebtop").hidden = true;       // 清單都讀不到,更不該給送出鈕
+      return say(j.錯誤, "err");
+    }
+    WEB = j;
+    drawWeb();
+    say(j.訊息 || "", j.訊息 ? "err" : "");
+  } catch (e) { say("連不上程式，是不是關掉了？", "err"); }
+}
+
+// kind:go 會貼出去／goask 對話框裡最後核對用（不給按鈕）／no 勾了但被擋／
+//        cand 還沒勾
+function webItem(it, kind) {
+  const blocked = !!it.擋下原因;
+  const btn = kind === "goask" ? ""
+    : kind === "cand"
+      ? (blocked ? "" : `<button data-web="${esc(it.文號)}" data-act="on"
+            >＋ 加入張貼</button>`)
+      : `<button data-web="${esc(it.文號)}" data-act="off">${
+          kind === "go" ? "✕ 這筆不貼" : "✕ 取消勾選"}</button>`;
+  // 會貼的那幾筆要看得到**實際上校網長什麼樣**:標題／分類／附件是表單欄位
+  // （等寬框核對），內文是全校要讀的那幾百字（攤開來、正常字體）。
+  const body = (kind === "go" || kind === "goask")
+    ? `<div class="wmeta"><span class="lbl">標題　</span><b>${esc(it.標題)}</b><br>
+         <span class="lbl">分類　</span>${esc((it.分類 || []).join("＋")) || "（無）"}<br>
+         <span class="lbl">附件　</span>${esc((it.附件 || []).join("、")) || "（無）"}</div>
+       <div class="wbody">${esc(it.內文)}</div>`
+    : (blocked ? `<p class="why">✖ ${esc(it.擋下原因)}</p>` : "");
+  const cls = (kind === "go" || kind === "goask") ? "go" : blocked ? "no" : "";
+  const tag = (kind === "go" || kind === "goask")
+    ? '<span class="pill ok">會貼上校網</span>' : "";
+  return `<div class="si ${cls}">
+    <div class="sh"><span class="no">${esc(it.文號)}</span>${tag}
+      <span class="su">${esc(it.主旨)}</span>${btn}</div>${body}</div>`;
+}
+
+function drawWeb() {
+  const go = WEB.可貼 || [], stuck = WEB.擋下 || [], cand = WEB.候選 || [];
+  // 這盞燈跟陳核／存查那盞**條件相反**:那兩頁要收文的 Chrome 開著,張貼要它關掉
+  // （張貼自己開一個新的,兩邊同一個 Selenium 設定檔）。後端算好,這裡只畫。
+  const cr = WEB.chrome || { ok: true }, warn = WEB.警告 || [];
+  el("count").textContent = `會貼 ${go.length} 筆`;
+  const sec = (title, hint, items, kind, empty) => `
+    <div class="box">
+      <p class="fld">${title} <span>${hint}</span></p>
+      ${items.length ? items.map(it => webItem(it, kind)).join("")
+                     : `<div class="mut">${empty}</div>`}
+    </div>`;
+  // 缺 sssh_publish_unit 這種要先講:讓人按下去才在「發布單位」那步停住最糟,
+  // 那時 Chrome 已經開了、校網也登入了。後端也用同一份警告擋住送出。
+  const warns = warn.map(w => `<div class="note">⚠️ ${esc(w)}</div>`).join("");
+  const blocked = !cr.ok || warn.length;
+  el("detail").innerHTML = `
+    <div class="danger">這一頁<b>會真的貼上校網</b> —— 貼出去<b>全校師生家長都看得到</b>，
+      是整套流程裡唯一真的對外的一步。貼的是「公告」那一頁的文案（你改過的字就是
+      會貼出去的字）。這一段<b>不碰 edoc、不用插卡</b>，但它會自己開一個 Chrome
+      填校網表單，那期間不要動滑鼠。</div>
+    ${cr.ok ? "" : `<div class="note"><b>⛔ 現在貼不了：</b>${esc(cr.說明)}</div>`}
+    ${warns}
+    ${go.length > 1 ? `<div class="note">第一次貼之前建議<b>先只勾 1 筆</b>試水溫 ——
+      要確認的是校網上的版面（區塊標題有沒有靠左變大）、分類有沒有選對、附件有沒有
+      傳對。都對了再開批次。</div>` : ""}
+    ${sec("會貼上校網", `${go.length} 筆 · 下面就是實際會出現在校網上的標題、分類、附件與內文`,
+          go, "go", "還沒有。到下面「其他待辦」按「＋ 加入張貼」把公文加進來。")}
+    ${stuck.length ? sec("你勾了要貼，但貼不出去",
+          `${stuck.length} 筆 · 程式不會碰這些`, stuck, "no", "") : ""}
+    ${sec("其他待辦", `${cand.length} 筆 · 按「＋ 加入張貼」等於在審核表「張貼」欄打 OK`,
+          cand, "cand", "待辦都處理過了。")}
+    <div class="sendbar">
+      <button id="doweb" class="big risk" ${
+        go.length && !blocked ? "" : "disabled"}>貼上校網（${go.length} 筆）</button>
+      <span class="mut">${!cr.ok ? "Chrome 的狀況要先處理（原因見上面）。"
+        : warn.length ? "上面那則警告要先處理，不然會在發布那步停住。"
+        : "按下去會再問一次，並讓你看最後一遍每一篇的全文。"}</span>
+    </div>`;
+  [...document.querySelectorAll("[data-web]")].forEach(b =>
+    b.onclick = () => gateWeb(b, b.dataset.act === "on" ? "OK" : ""));
+  el("doweb").onclick = askWeb;
+  // 上面那顆與底下那顆是同一個動作,狀態要一起走。
+  const top = el("dowebtop");
+  top.hidden = false;
+  top.textContent = `貼上校網（${go.length} 筆）`;
+  top.disabled = !(go.length && !blocked);
+  top.title = cr.ok ? (warn[0] || "會再問一次才真的貼") : (cr.說明 || "");
+  top.onclick = askWeb;
+}
+
+// 勾／取消 —— 寫「張貼」欄，寫完重算清單（那筆會換到別堆去）。
+async function gateWeb(btn, val) {
+  const doc = btn.dataset.web;
+  btn.disabled = true;
+  btn.textContent = "存…";
+  try {
+    const j = await (await fetch("/api/save", {
+      method: "POST", body: JSON.stringify({ 文號: doc, 張貼: val })
+    })).json();
+    if (!j.ok) { btn.disabled = false; return say(j.錯誤, "err"); }
+  } catch (e) { btn.disabled = false; return say("存不進去：" + e, "err"); }
+  await loadWeb();
+}
+
+function askWeb() {
+  const go = (WEB && WEB.可貼) || [];
+  if (!go.length) return;
+  el("webitems").innerHTML = go.map(it => webItem(it, "goask")).join("");
+  show("webask", true);
+}
+
+el("webno").onclick = () => show("webask", false);
+
+el("webyes").onclick = async () => {
+  show("webask", false);
+  const go = (WEB && WEB.可貼) || [];
+  const j = await (await fetch("/api/web/start", {
+    method: "POST",
+    // 文號**和指紋**一起送過去。指紋是後端算的（標題＋內文＋分類＋附件）——
+    // 只比文號擋不住「文案被換掉」:文號一樣、字全變了照樣過關,而你在確認框裡
+    // 看的是那幾百字。真正動手的那支還會自己再算一次比對。
+    body: JSON.stringify({
+      確認: true,
+      文號: go.map(it => it.文號),
+      指紋: Object.fromEntries(go.map(it => [it.文號, it.指紋]))
+    })
+  })).json();
+  if (!j.ok) return say(j.錯誤, "err");
+  say(`開始貼上校網 ${j.筆數} 筆`);
+  watch("web");
+};
+
+// ── 背景工作:收新公文 / 送陳核 / 讀清單 / 歸檔 / 產文案 / 張貼 ────────────
 // 兩件事共用同一個進度面板與輪詢 —— 都是操作同一個 Chrome、都只能等它跑完，
 // 介面沒有理由長成兩套。後端 Job 也互斥，同一時間只會有一支在跑。
 let JOB = "prep", seen = 0, poll = null;
@@ -976,6 +1166,10 @@ const JOBTXT = {
   // 而假警告會讓真警告也被當成裝飾（坑 #13 的教訓是「要明講能不能動」）。
   announce: { run: "產生文案中…（在叫 AI，可以照常用電腦）", ok: "文案產好了",
               stop: "停止（已經產好的那幾筆會留著）" },
+  // 張貼不碰 edoc、不用插卡，但它自己開的 Chrome 正在填校網表單 ——
+  // 那段一樣不能動滑鼠，所以這句話是真的。
+  web: { run: "貼上校網中…請不要動滑鼠", ok: "張貼結束",
+         stop: "中止（目前這筆可能停在一半，貼出去的不會收回）" },
 };
 
 const show = (id, on) => el(id).hidden = !on;
@@ -992,14 +1186,15 @@ function watch(job) {
   el("prep").disabled = true;
   // 跑的時候所有會起另一支工作的鈕都要按不下去（後端也互斥，這裡是不要讓人白按）。
   // 公告那幾顆也算:它雖然不碰 Chrome，但跟收文一樣會寫審核表，同樣被互斥擋掉。
-  ["dosend", "doarch", "doscan", "rescan", "doanc"].forEach(id => {
+  ["dosend", "doarch", "doscan", "rescan", "doanc", "doweb"].forEach(id => {
     const b = el(id);
     if (b) b.disabled = true;
   });
-  [...document.querySelectorAll("[data-anc],[data-redo]")]
+  [...document.querySelectorAll("[data-anc],[data-redo],[data-web]")]
     .forEach(b => b.disabled = true);
   el("dosendtop").disabled = true;
   el("doarchtop").disabled = true;
+  el("dowebtop").disabled = true;
   clearInterval(poll);
   poll = setInterval(tick, 900);
   tick();
@@ -1049,6 +1244,8 @@ async function tick() {
     if (TAB === "arch") await loadArch();
     else if (TAB === "send") await loadSend();
     else if (TAB === "anc") await loadAnc();
+    // 張貼跑完那幾筆會多出 *已公告.txt,plan() 就不再列它們（不重貼）。
+    else if (TAB === "web") await loadWeb();
     else await load();
     if (good) {
       // 成功就自己收起來 —— 面板一直開著，使用者不知道到底跑完了沒。
@@ -1063,11 +1260,12 @@ async function tick() {
 // 存查頁的「重新整理」只重讀後端已經有的那份清單,**不會**再去點 edoc ——
 // 要重讀 edoc 得按頁面裡的「重讀清單」。誤觸重新整理不該去動瀏覽器。
 el("reload").onclick = () => TAB === "arch" ? loadArch()
-  : TAB === "send" ? loadSend() : TAB === "anc" ? loadAnc() : load();
+  : TAB === "send" ? loadSend() : TAB === "anc" ? loadAnc()
+  : TAB === "web" ? loadWeb() : load();
 load();
-// 萬一頁面重整時工作還在跑,接回去繼續看。五支都要問 —— 重整那一刻正在跑的
+// 萬一頁面重整時工作還在跑,接回去繼續看。六支都要問 —— 重整那一刻正在跑的
 // 可能是送陳核或歸檔，接錯支就會盯著一個沒在動的面板。
-["prep", "send", "scan", "archive", "announce"].forEach(job =>
+["prep", "send", "scan", "archive", "announce", "web"].forEach(job =>
   fetch(`/api/${job}/status?since=0`).then(r => r.json())
     .then(j => { if (j.執行中) watch(job); }).catch(() => {}));
 </script>
