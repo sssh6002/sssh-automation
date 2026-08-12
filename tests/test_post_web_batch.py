@@ -292,6 +292,90 @@ def test_heading_style_restores_even_on_error():
     assert sssh_style._S["h3"] == old
 
 
+# ── 發布單位:設完要讀回來確認 ───────────────────────────────────────────────
+#
+# 2026-08-12 實跑:貼三篇，校網「單位」欄兩篇對、一篇是圖書館，而 log 上兩筆都印
+# `OK:發布單位(自訂下拉)已選「資訊媒體組」`—— **那個 OK 是假的**。
+# 從實物讀到:那欄是 `input[id^=ct-etAnnoGroup-]`，沒選時是「無群組」，
+# 旁邊 hidden 才是真正送出去的群組 id。
+
+class _FakeDriver:
+    """execute_script 照 states 依序回答（最後一個會一直重複）。"""
+
+    def __init__(self, states):
+        self.states = list(states)
+        self.calls = 0
+
+    def execute_script(self, js, *a):
+        self.calls += 1
+        return self.states[min(self.calls, len(self.states)) - 1]
+
+
+def _patched_selector(monkeypatch, real):
+    """裝上 verified_publish_unit，回被換過的那支。"""
+    from document_closure import document_closure_post_web as pw
+    monkeypatch.setattr(pw, "_select_publish_unit", real)
+    with pwb.verified_publish_unit(tries=3, wait=0):
+        return pw._select_publish_unit
+
+
+OKST = {"value": "資訊媒體組", "id": "ct-etAnnoGroup-x", "hidden": "g99"}
+BADST = {"value": "無群組", "id": "ct-etAnnoGroup-x", "hidden": ""}
+
+
+def test_unit_verified_ok(monkeypatch):
+    sel = _patched_selector(monkeypatch, lambda d, u: True)
+    assert sel(_FakeDriver([OKST]), "資訊媒體組") is True
+
+
+def test_unit_retries_then_succeeds(monkeypatch):
+    """第一次沒設進去 → 重試原本那支（不自己塞值）→ 成功。"""
+    tries = []
+    sel = _patched_selector(monkeypatch,
+                            lambda d, u: (tries.append(1), True)[1])
+    assert sel(_FakeDriver([BADST, OKST]), "資訊媒體組") is True
+    assert len(tries) == 2                      # 有真的重試
+
+
+def test_unit_blocks_when_never_set(monkeypatch):
+    """一直設不進去 → 回 False，讓 _submit_announcement 停下不發。
+
+    沒選單位的公告會被校網掛成該頁所屬單位（圖書館）——
+    **寧可不貼，也不要貼成別的單位。**
+    """
+    sel = _patched_selector(monkeypatch, lambda d, u: True)
+    assert sel(_FakeDriver([BADST]), "資訊媒體組") is False
+
+
+def test_unit_blocks_when_hidden_id_empty(monkeypatch):
+    """文字對了但 hidden 群組 id 是空的 = 等於沒選到，照樣擋。
+
+    這是「光把文字塞進 input」會出現的樣子 —— 看起來對，送出去沒有單位。
+    """
+    sel = _patched_selector(monkeypatch, lambda d, u: True)
+    st = {"value": "資訊媒體組", "id": "ct-etAnnoGroup-x", "hidden": ""}
+    assert sel(_FakeDriver([st]), "資訊媒體組") is False
+
+
+def test_unit_does_not_block_when_unreadable(monkeypatch):
+    """讀不到那個欄位（站台改版換了 id）→ **不擋**，只大聲警告。
+
+    假警告會讓真警告一起被當成裝飾（坑 #13）;而這道擋下去的代價是整批停下，
+    不能靠猜。只在「證明是錯的」時候擋。
+    """
+    sel = _patched_selector(monkeypatch, lambda d, u: True)
+    assert sel(_FakeDriver([None]), "資訊媒體組") is True
+
+
+def test_unit_wrapper_restores_even_on_error():
+    from document_closure import document_closure_post_web as pw
+    real = pw._select_publish_unit
+    with pytest.raises(RuntimeError):
+        with pwb.verified_publish_unit():
+            raise RuntimeError("中斷")
+    assert pw._select_publish_unit is real
+
+
 # ── 文案拆解 ───────────────────────────────────────────────────────────────
 
 def test_split_takes_first_line_as_title():

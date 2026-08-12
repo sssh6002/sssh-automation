@@ -276,6 +276,165 @@ def sssh_heading_style(align=None, size=None):
         sssh_style._S["h3"] = old
 
 
+# ── 發布單位的診斷（2026-08-12）───────────────────────────────────────────
+#
+# 為什麼要這段:當天貼三篇，校網「單位」欄兩篇對、**一篇是圖書館**，而 log 上
+# 兩筆都印 `OK:發布單位(自訂下拉)已選「資訊媒體組」` —— **那個 OK 是假的**。
+# 已知那個欄位不是原生 `<select>`（策略 1 從沒中過，一律走 fallback），
+# 而同一批第 1 筆失敗、第 2 筆成功，聞起來是時間差。
+#
+# ⚠️ 這段**只印，不改任何行為**。真正的修法是「設完讀回來確認、不對就停下不發」，
+# 但那要先知道「目前值顯示在哪個元素」—— 猜著寫會變成另一個假的檢查（坑 #2:
+# 改判定基準前先查清楚）。所以先讓它在**真的壞掉的那個時機**把長相印出來。
+# 讀完就把這段換成真的檢查。
+
+_UNIT_STATE_JS = r"""
+var unit = (arguments[0] || '').trim();
+var out = {found: false};
+var lab = null;
+for (var e of document.querySelectorAll('*')) {
+    if (e.children.length === 0 && (e.textContent || '').trim() === '發布單位') {
+        lab = e; break;
+    }
+}
+if (!lab) return out;
+out.found = true;
+out.labelTag = lab.tagName + '.' + String(lab.className || '').slice(0, 40);
+var box = lab;
+for (var i = 0; i < 4 && box.parentElement; i++) box = box.parentElement;
+out.boxTag = box.tagName + '.' + String(box.className || '').slice(0, 40);
+out.boxLines = (box.innerText || '').split('\n')
+    .map(function (s) { return s.trim(); }).filter(Boolean).slice(0, 12);
+out.selects = [];
+box.querySelectorAll('select').forEach(function (s) {
+    var o = s.options[s.selectedIndex] || {};
+    out.selects.push({id: s.id || s.name || '', value: String(s.value || ''),
+                      selected: (o.text || '').trim(), n: s.options.length});
+});
+out.inputs = [];
+box.querySelectorAll('input').forEach(function (s) {
+    out.inputs.push({id: s.id || s.name || '', type: s.type,
+                     value: String(s.value || '').slice(0, 40)});
+});
+out.leaves = [];
+box.querySelectorAll('*').forEach(function (n) {
+    var t = (n.innerText || '').trim();
+    if (n.children.length === 0 && t && t.length <= 14) {
+        out.leaves.push({tag: n.tagName,
+                         cls: String(n.className || '').slice(0, 30),
+                         role: n.getAttribute('role') || '',
+                         text: t, hit: t === unit});
+    }
+});
+out.leaves = out.leaves.slice(0, 18);
+return out;
+"""
+
+
+# 2026-08-12 從實物讀到的:發布單位**不是 `<select>`**，是一個 `input type=text`
+# （id 開頭 `ct-etAnnoGroup-`，後面接亂數，所以只能用前綴選）。
+# 旁邊還有一個 hidden 欄位，那才是真正送出去的「群組 id」——
+# ⚠️ **所以光把文字塞進 input 沒有用**，一定要真的去點那個下拉讓 hidden 一起被填。
+# 這也是這裡只做「讀回來確認 + 重試原本那支」、不自己塞值的原因。
+UNIT_INPUT_PREFIX = "ct-etAnnoGroup-"
+# 沒選單位時那一欄的字。這種公告會被校網掛成**那一頁所屬的單位**（圖書館）——
+# 2026-08-12 第一批第 1 筆就是這樣變成圖書館的。
+UNIT_UNSET = "無群組"
+
+_UNIT_READ_JS = r"""
+var el = document.querySelector('input[id^="ct-etAnnoGroup-"]');
+if (!el) return null;
+var hid = '';
+var box = el.parentElement;
+for (var i = 0; i < 3 && box && !hid; i++) {
+    var h = box.querySelector('input[type=hidden]');
+    if (h) hid = String(h.value || '');
+    box = box.parentElement;
+}
+return {value: String(el.value || ''), id: el.id, hidden: hid};
+"""
+
+
+def read_publish_unit(driver):
+    """讀「發布單位」現在實際是什麼。回 dict 或 None（讀不到）。
+
+    `{'value': 顯示的字, 'hidden': 送出去的群組 id, 'id': 那個 input 的 id}`
+    """
+    try:
+        return driver.execute_script(_UNIT_READ_JS)
+    except Exception as e:
+        print(f"[post_web_batch] 讀發布單位時出錯:{type(e).__name__}: {e}")
+        return None
+
+
+@contextlib.contextmanager
+def verified_publish_unit(tries=3, wait=1.5):
+    """發布單位設完**讀回來確認**;確認不了就讓那一筆停下不發。
+
+    為什麼要這道（2026-08-12 實跑證據）:當天貼三篇，校網「單位」欄兩篇對、
+    **一篇是圖書館**，而 log 上兩筆都印 `OK:發布單位(自訂下拉)已選「資訊媒體組」`
+    —— **那個 OK 是假的**。同一批第 1 筆失敗、第 2 筆成功，是時間差
+    （原本那支點開下拉只等 0.8 秒，然後在**整份 document** 裡找文字相符的元素點下去）。
+
+    做法刻意保守:
+      · **不自己塞值** —— hidden 那個群組 id 塞不進去，塞了只是文字好看（見上面）。
+        要重試就重試原本那支，讓它自己去點。
+      · **只在「證明是錯的」時候擋** —— 讀不到那個欄位（例如站台改版換了 id）
+        一律放行並大聲警告。假警告會讓真警告一起被當成裝飾（坑 #13）;
+        而這道擋下去的代價是整批停下，不能靠猜。
+      · 擋下的方式是回 False —— `_submit_announcement` 會印 STOP banner 不發佈，
+        `run()` 逐筆失敗即中止，結束碼 1。**寧可不貼，也不要貼成別的單位。**
+    """
+    import time
+    from document_closure import document_closure_post_web as pw
+    real = pw._select_publish_unit
+
+    def patched(driver, unit):
+        ok = real(driver, unit)
+        for n in range(1, tries + 1):
+            st = read_publish_unit(driver)
+            if st is None:
+                print(f"[post_web_batch] ⚠️ 讀不到發布單位欄位"
+                      f"（找不到 id 開頭 {UNIT_INPUT_PREFIX} 的欄位，站台可能改版）"
+                      f"—— 這一筆的單位**沒辦法確認**，照原本的結果繼續。"
+                      f"貼完請自己去校網看那筆的「單位」欄。")
+                return ok
+            got = (st.get("value") or "").strip()
+            if got == unit and (st.get("hidden") or "").strip():
+                if n > 1:
+                    print(f"[post_web_batch] ✓ 發布單位第 {n} 次才設定成功:{got}")
+                else:
+                    print(f"[post_web_batch] ✓ 發布單位讀回來確認:{got}")
+                return True
+            why = (f"還是「{got or '空的'}」" if got != unit
+                   else "文字對了但群組 id 是空的（等於沒選到）")
+            print(f"[post_web_batch] ⚠️ 發布單位{why} —— "
+                  f"原本那支回報{'成功' if ok else '失敗'}，實際沒設進去。"
+                  f"（第 {n}/{tries} 次）")
+            if n < tries:
+                time.sleep(wait)
+                ok = real(driver, unit)
+        st = read_publish_unit(driver) or {}
+        print(f"[post_web_batch] ⛔ 發布單位設不進去（現在是"
+              f"「{(st.get('value') or '空的').strip()}」，要的是「{unit}」）"
+              f"—— 這一筆**不發佈**。")
+        print(f"[post_web_batch]    沒選單位的公告會被校網掛成該頁所屬單位"
+              f"（圖書館），寧可不貼也不要掛錯單位。")
+        try:
+            print("[post_web_batch][診斷] 發布單位實況 "
+                  + json.dumps(driver.execute_script(_UNIT_STATE_JS, unit),
+                               ensure_ascii=False)[:1200])
+        except Exception:
+            pass
+        return False
+
+    pw._select_publish_unit = patched
+    try:
+        yield
+    finally:
+        pw._select_publish_unit = real
+
+
 # ── 真的貼 ─────────────────────────────────────────────────────────────────
 
 def run(expect, path=None):
@@ -330,7 +489,8 @@ def run(expect, path=None):
     ok = 0
     try:
         from document_closure.document_closure_post_web import maybe_post_announcement
-        with announcement_as_summary(texts), sssh_heading_style():
+        with announcement_as_summary(texts), sssh_heading_style(), \
+                verified_publish_unit():
             for i, it in enumerate(ready, 1):
                 print(f"\n[{i}/{len(ready)}] {it['文號']} {it['標題'][:40]}")
                 if maybe_post_announcement(driver, it["目錄"]):
