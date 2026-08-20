@@ -93,6 +93,17 @@ chrome_browser.log                — Chrome 端 JS console.log 落地 (由 clic
 
 ### 安裝相依套件
 
+> **接手的人請看 [`安裝說明.md`](安裝說明.md)，不要照這一節手做。**
+> 點兩下 `安裝.bat` 就好（它會找 Python、裝 `requirements.txt`、複製 `env.env`、
+> 跑 `doctor.py` 把還缺什麼用中文講完）。
+>
+> ⚠️ 下面這行有兩個坑:
+> ① **少了 `openpyxl`** —— 審核表（`公告彙整.xlsx`）讀寫要它，沒有它整個介面等於廢掉。
+> ② 這台機器有兩個 Python:`py` 是 3.14.4（**沒有** openpyxl）、`python` 是
+> `C:\Python314`（有）。**裝到哪一支、就要用哪一支跑**，不然症狀是「審核表寫不進去」
+> 而訊息看起來很無辜（交接檔坑 #4）。`安裝.bat` 會把選到的那支記進
+> `python-path.txt`，`啟動.bat` 用同一支。
+
 ```powershell
 py -m pip install pillow pyautogui selenium pywin32 pyyaml pywinpty
 ```

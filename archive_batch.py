@@ -46,6 +46,7 @@
 讀不到 8 位檔號的公文，原程式會安全停下不硬填 —— 那道閘門保留，不要繞過。
 """
 
+import contextlib
 import json
 import os
 import re
@@ -69,6 +70,191 @@ _CATEGORY_RE = re.compile(r"#\s*存查分類\s*[:：]\s*(\S+)(?:\s+(\d{8}))?")
 
 
 # ── 把「自動貼校網」關掉 ────────────────────────────────────────────────────
+
+# ── 2026-08 edoc 版更:存查前一定要先點【附件歸檔】────────────────────────
+#
+# 來源:市府「8月公文系統版更【附件資訊自動帶入附件編目欄位】操作手冊」——
+#   「過往操作是直接點選確定存檔或確定送發即可，現修改為**需先點選【附件歸檔】**，
+#     方能存查或發文，否則會跳出提示視窗。**若公文無附件，也需要先點選【附件歸檔】**。」
+#   「點【附件歸檔】→ 公文內的附件將自動帶入…**無須儲存，直接關閉此視窗即可**
+#     → 再次點選確定存檔」
+#
+# 這一條害慘 2026-08-14 那批:按「確定存檔」被提示視窗擋住 → **簽章根本沒開始**
+# → 15 秒等不到 pinCode 視窗。而 `document_closure` 那道「文號從待結案可見列消失」
+# 的驗證，在存查表單還開著時必然成立 → 誤判成功 → **寫了假的已存查標記** →
+# 那筆之後被 `plan()` 判成 danger，整批鎖死（坑 #26）。
+#
+# 修法長在 fork 側:換掉 `_click_confirm_save_button` 這個模組屬性，讓它在按下
+# 「確定存檔」之前先做完附件歸檔。`document_closure.py` 一行沒改 ——
+# ⚠️ 但**系管師那條路（`main.py 3`）沒有這段，一樣會撞到**，要跟他說。
+
+_ATTACH_BTN_XPATHS = [
+    "//input[@value='附件歸檔']",
+    "//*[@value='附件歸檔']",
+    "//button[normalize-space()='附件歸檔']",
+    "//a[normalize-space()='附件歸檔']",
+    "//*[normalize-space()='附件歸檔' and (self::button or @role='button')]",
+    "//*[normalize-space()='附件歸檔']/ancestor::button[1]",
+    "//*[normalize-space()='附件歸檔']/ancestor::a[1]",
+]
+_CONFIRM_XPATH = "//*[@value='確定存檔' or normalize-space()='確定存檔']"
+
+
+def _click_first_visible(driver, xpaths):
+    """照順序找第一個看得見的元素點下去。回用到的 XPath 或 None。"""
+    from selenium.webdriver.common.by import By
+    for xp in xpaths:
+        try:
+            els = driver.find_elements(By.XPATH, xp)
+        except Exception:
+            continue
+        for el in els:
+            try:
+                if not el.is_displayed():
+                    continue
+                driver.execute_script(
+                    "arguments[0].scrollIntoView({block:'center'});"
+                    "arguments[0].click();", el)
+                return xp
+            except Exception:
+                continue
+    return None
+
+
+def _focus_frame_with(driver, xpath, depth=2):
+    """把 driver 切回「看得到這個元素」的那層 frame。回 True/False。
+
+    為什麼需要:切到別的視窗再切回來，frame 會被重設成最上層 ——
+    而存查表單住在 frame 裡。不切回去的話，接著要按的「確定存檔」就找不到。
+    """
+    from selenium.webdriver.common.by import By
+
+    def here():
+        try:
+            return bool(driver.find_elements(By.XPATH, xpath))
+        except Exception:
+            return False
+
+    def walk(level):
+        if here():
+            return True
+        if level <= 0:
+            return False
+        try:
+            frames = driver.find_elements(By.TAG_NAME, "iframe") + \
+                driver.find_elements(By.TAG_NAME, "frame")
+        except Exception:
+            return False
+        for i in range(len(frames)):
+            try:
+                fr = (driver.find_elements(By.TAG_NAME, "iframe") +
+                      driver.find_elements(By.TAG_NAME, "frame"))[i]
+                driver.switch_to.frame(fr)
+            except Exception:
+                continue
+            if walk(level - 1):
+                return True
+            try:
+                driver.switch_to.parent_frame()
+            except Exception:
+                driver.switch_to.default_content()
+                return False
+        return False
+
+    driver.switch_to.default_content()
+    return walk(depth)
+
+
+def do_attachment_archive(driver, wait_popup=8.0):
+    """點【附件歸檔】，把跳出來的視窗關掉。回 True/False。
+
+    手冊說「無須儲存，直接關閉此視窗即可」—— 所以這裡**只開再關**，
+    不去動裡面的附件（附件是自動帶入的;要增修刪是人的判斷，不是程式的）。
+    """
+    import time
+    from selenium.webdriver.common.by import By
+
+    before = set(driver.window_handles)
+    main_handle = driver.current_window_handle
+    xp = _click_first_visible(driver, _ATTACH_BTN_XPATHS)
+    if not xp:
+        print("[archive_batch] ⛔ 找不到【附件歸檔】按鈕 —— 這一筆不送出。")
+        print("[archive_batch]    2026-08 版更之後，沒先按它就按「確定存檔」會被"
+              "提示視窗擋住，而程式會誤判成功、寫下假的存查標記（坑 #26）。")
+        print("[archive_batch]    請到 edoc 看一下那張表單上按鈕的名字是不是又改了。")
+        return False
+    print(f"      OK:點到【附件歸檔】(XPath: {xp})")
+
+    # 等它跳出來 —— 可能是新視窗，也可能是頁面內的對話框。
+    deadline = time.time() + wait_popup
+    new = None
+    while time.time() < deadline:
+        extra = set(driver.window_handles) - before
+        if extra:
+            new = extra.pop()
+            break
+        time.sleep(0.3)
+
+    if new:
+        try:
+            driver.switch_to.window(new)
+            time.sleep(1.2)                 # 讓附件自動帶入跑完
+            print("      OK:附件歸檔視窗已開（附件自動帶入），直接關掉")
+            driver.close()
+        except Exception as e:
+            print(f"[archive_batch] ⚠️ 關附件歸檔視窗時出錯:{type(e).__name__}: {e}")
+        finally:
+            driver.switch_to.window(main_handle)
+        # ⚠️ 切視窗會把 frame 重設到最上層，一定要切回存查表單那層。
+        if not _focus_frame_with(driver, _CONFIRM_XPATH):
+            print("[archive_batch] ⛔ 關掉附件歸檔視窗後找不回存查表單 —— 這一筆不送出。")
+            return False
+        return True
+
+    # 沒有新視窗 → 當成頁面內的對話框，找關閉鈕;找不到就按 ESC。
+    time.sleep(1.2)
+    closed = _click_first_visible(driver, [
+        "//*[normalize-space()='關閉' and (self::button or self::a or @role='button')]",
+        "//input[@value='關閉']",
+        "//*[contains(@class,'ui-dialog-titlebar-close')]",
+        "//*[@aria-label='Close' or @title='關閉']",
+    ])
+    if closed:
+        print(f"      OK:附件歸檔對話框已關（{closed}）")
+    else:
+        try:
+            from selenium.webdriver.common.keys import Keys
+            driver.find_element(By.TAG_NAME, "body").send_keys(Keys.ESCAPE)
+            print("      OK:附件歸檔對話框以 ESC 關掉")
+        except Exception:
+            print("[archive_batch] ⚠️ 沒偵測到附件歸檔視窗（可能本來就沒跳）—— 繼續。")
+    return True
+
+
+@contextlib.contextmanager
+def attachment_archive_first():
+    """讓每一次「確定存檔」之前都先做完【附件歸檔】。用完還原。
+
+    做不到就**回 False 不按確定存檔** —— 呼叫端看到 False 會
+    `return False` 收工，那是在 `last_signed_doc_no = doc_no` 與寫標記**之前**，
+    所以不會簽章、也不會留下假標記。寧可這一輪失敗，也不要再製造一個
+    「磁碟說辦完、edoc 說還在」的公文。
+    """
+    from document_closure import document_closure as dc
+    real = dc._click_confirm_save_button
+
+    def patched(driver, timeout=10):
+        print("[archive_batch] 2026-08 版更:先點【附件歸檔】才能存查…")
+        if not do_attachment_archive(driver):
+            return False
+        return real(driver, timeout=timeout)
+
+    dc._click_confirm_save_button = patched
+    try:
+        yield
+    finally:
+        dc._click_confirm_save_button = real
+
 
 def disable_auto_post():
     """把 `maybe_post_announcement` 換成不做事的版本。回原本那支（供還原）。
@@ -170,9 +356,13 @@ def evaluate(doc_no):
     item = {"文號": doc_no, "分類": cat or "", "檔號": num or "", "來源": src or "",
             "已存查標記": False}
     closure_dir = os.path.join(_BASE_DIR, "document_download_closure", doc_no)
-    if any(n.endswith(MARKER_SUFFIX)
-           for n in (os.listdir(closure_dir) if os.path.isdir(closure_dir) else [])):
+    marks = [n for n in (os.listdir(closure_dir) if os.path.isdir(closure_dir) else [])
+             if n.endswith(MARKER_SUFFIX)]
+    if marks:
         item["已存查標記"] = True
+        # 標記檔的完整路徑一起帶出去 —— 這種公文卡住時，人唯一能做的動作就是
+        # 「確認 edoc 上其實沒歸檔 → 把這個假標記刪掉」，而要刪就得知道刪哪個。
+        item["標記檔"] = [os.path.join(closure_dir, n) for n in marks]
         item["擋下原因"] = "已經存查過（結案目錄有 已存查.txt）"
     elif cat is None:
         item["擋下原因"] = "找不到總結檔的 #存查分類 那一行 —— 先補跑摘要"
@@ -438,7 +628,9 @@ def main():
     print(f"預期會歸檔 {len(p['會歸檔'])} 筆:{'、'.join(p['會歸檔'])}")
     disable_auto_post()
     from document_closure.document_closure import process_document_closure
-    ok = process_document_closure(driver)
+    # 2026-08 版更:每一筆按「確定存檔」之前要先點【附件歸檔】，見上面那段。
+    with attachment_archive_first():
+        ok = process_document_closure(driver)
     print(f"\n===== 結案存查流程{'完成' if ok else '中止'} =====")
     if not ok:
         raise SystemExit(1)

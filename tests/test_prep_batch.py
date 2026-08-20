@@ -570,3 +570,66 @@ def test_attach_failure_is_explained(monkeypatch, stub_edoc):
     """接不上就明講，不要往下跑。"""
     monkeypatch.setattr(pb, "attach_driver", lambda: None)
     assert pb.download_stage(attach=True) == (None, False)
+
+
+# ── 中文安裝路徑:改用剪貼簿貼路徑（2026-08-14）─────────────────────────────
+#
+# KdApp 的「匯出公文資料」對話框用模擬實體鍵盤填路徑，而 VkKeyScanW 只認得
+# ASCII —— 中文字被跳過，於是
+#     D:\D_資訊系統\自動辦文工具\document_download
+#   → D:\D_\document_download
+# 公文靜靜掉到別的資料夾，而對話框照樣關掉。
+
+def test_ascii_path_still_uses_the_keyboard(monkeypatch):
+    """純英數路徑要走原本那條已經驗過的鍵盤路 —— 行為一個字都不能變。"""
+    import pending_doc_handler as pdh
+    typed = []
+    monkeypatch.setattr(pdh, "_send_text_vk",
+                        lambda t, per_char_delay=0.02: typed.append(t))
+    with pb.unicode_safe_dialog_path():
+        pdh._send_text_vk(r"D:\sssh-automation\document_download")
+    assert typed == [r"D:\sssh-automation\document_download"]
+
+
+def test_chinese_path_goes_through_the_clipboard(monkeypatch):
+    """中文路徑改成「複製到剪貼簿 + Ctrl+V」，不再逐字模擬鍵盤。"""
+    import pending_doc_handler as pdh
+    typed, copied, combos = [], [], []
+    monkeypatch.setattr(pdh, "_send_text_vk",
+                        lambda t, per_char_delay=0.02: typed.append(t))
+    monkeypatch.setattr(pb, "_copy_to_clipboard",
+                        lambda t: (copied.append(t), True)[1])
+    monkeypatch.setattr(pdh, "_send_ctrl_combo", lambda vk: combos.append(vk))
+    monkeypatch.setattr(pb.time, "sleep", lambda *a: None)
+    path = r"D:\D_資訊系統\自動辦文工具\document_download"
+    with pb.unicode_safe_dialog_path():
+        pdh._send_text_vk(path)
+    assert copied == [path]
+    assert combos == [pb._VK_V]          # 真的按了 Ctrl+V
+    assert typed == []                   # 沒有再逐字打
+
+
+def test_clipboard_failure_types_nothing(monkeypatch):
+    """剪貼簿放不進去 → **什麼都不打**。
+
+    打半截路徑的下場是公文靜靜掉到別的資料夾（這次的症狀）;什麼都不打的話
+    對話框不會關，原本那道「10s 內對話框沒關閉」會叫出來 —— 失敗要看得見。
+    """
+    import pending_doc_handler as pdh
+    typed, combos = [], []
+    monkeypatch.setattr(pdh, "_send_text_vk",
+                        lambda t, per_char_delay=0.02: typed.append(t))
+    monkeypatch.setattr(pb, "_copy_to_clipboard", lambda t: False)
+    monkeypatch.setattr(pdh, "_send_ctrl_combo", lambda vk: combos.append(vk))
+    with pb.unicode_safe_dialog_path():
+        pdh._send_text_vk(r"D:\中文\document_download")
+    assert typed == [] and combos == []
+
+
+def test_dialog_path_override_is_restored():
+    import pending_doc_handler as pdh
+    real = pdh._send_text_vk
+    with pytest.raises(RuntimeError):
+        with pb.unicode_safe_dialog_path():
+            raise RuntimeError("中斷")
+    assert pdh._send_text_vk is real

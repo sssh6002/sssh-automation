@@ -164,6 +164,54 @@
          font-size:13px;line-height:1.8}
   .wmeta b{color:var(--th)}
   .wmeta .lbl{color:var(--sub);font-weight:400}
+  /* ── 設定頁 ───────────────────────────────────────────────────────────
+     兩區:個人（密鑰,跟著人走）與共用（跟著這個學校、這個職務走）。
+     **個人區看不到值** —— 只有「已填／未填」。看得到就會被截圖、被貼進交接檔,
+     而這個 repo 是 public。 */
+  .cfg{display:grid;grid-template-columns:190px 1fr;gap:10px 14px;align-items:start}
+  .cfg > label{font-size:13px;font-weight:700;color:var(--th);padding-top:7px}
+  .cfg .v{display:flex;flex-direction:column;gap:4px}
+  .cfg input{width:100%;border:1px solid var(--line);border-radius:7px;padding:7px 9px;
+             font-family:inherit;font-size:14px}
+  .cfg input:focus{outline:2px solid #b9d4c9;outline-offset:-1px}
+  .cfg .hint{font-size:12px;color:var(--sub);line-height:1.6}
+  .cfg .hint b{color:var(--warn)}
+  .filled{font-size:11px;padding:1px 8px;border-radius:20px;align-self:flex-start;
+          background:#e1f5ee;color:var(--ok)}
+  .empty2{font-size:11px;padding:1px 8px;border-radius:20px;align-self:flex-start;
+          background:#fbf6dc;color:#7a6410}
+  .spec{display:flex;align-items:center;gap:10px;padding:7px 0;font-size:13px;
+        border-bottom:1px solid #f0f2f1}
+  .spec:last-child{border-bottom:0}
+  .spec .n{flex:1;font-family:Consolas,monospace}
+  /* 規格檔的表單。判斷還是留在那兩份檔案裡,但填的人不必碰 YAML／表格語法 ——
+     `routing_flags.yaml` 改壞會讓整份清單靜靜失效(讀不到就當空的),
+     所以那份尤其不能叫人去改原始檔。 */
+  .rows{display:flex;flex-direction:column;gap:5px;margin:6px 0 0}
+  .row{display:flex;gap:6px;align-items:center}
+  .row input{flex:1;border:1px solid var(--line);border-radius:6px;padding:5px 8px;
+             font-family:inherit;font-size:13px;min-width:0}
+  .row input.note{flex:2;color:var(--sub)}
+  .row button{padding:3px 9px;font-size:12px;white-space:nowrap}
+  .row .ord{display:flex;flex-direction:column;gap:1px}
+  .row .ord button{padding:0 6px;font-size:11px;line-height:1.35}
+  .addrow{align-self:flex-start;margin-top:2px}
+  .colhead{display:flex;gap:6px;font-size:11px;color:var(--sub);margin:8px 0 0}
+  .colhead span{flex:1}
+  .colhead span.note{flex:2}
+  .colhead span.btnpad{flex:none;width:74px}
+  .live{font-size:11px;padding:1px 8px;border-radius:20px;background:#eef0ef;
+        color:#666;margin-left:6px}
+  .live.bad{background:#fcebeb;color:var(--bad);font-weight:700}
+  /* 摺頁:很少改的東西收起來,但**壞掉的時候要自己打開**（見 routingBox）——
+     收起來的目的是別擋路,不是把問題藏起來。 */
+  details.fold > summary{cursor:pointer;font-size:13px;color:var(--th);
+                         font-weight:700;list-style:none}
+  details.fold > summary::-webkit-details-marker{display:none}
+  details.fold > summary::before{content:"▸ ";color:var(--sub)}
+  details.fold[open] > summary::before{content:"▾ "}
+  details.fold > summary span.sub{font-weight:400;color:var(--sub);font-size:12px}
+  details.fold[open] > summary{margin-bottom:6px}
 </style>
 
 <div class="tabs">
@@ -171,7 +219,7 @@
   <div class="click" id="tabarch">存查</div>
   <div class="click" id="tabanc">公告</div>
   <div class="click" id="tabweb">張貼</div><div class="click" id="tabold">舊文</div>
-  <div class="soon">設定</div>
+  <div class="click" id="tabset">設定</div>
 </div>
 
 <div class="bar">
@@ -342,14 +390,15 @@ function drawList() {
 }
 
 const TITLE = { live: "摘要", old: "舊文", send: "陳核", arch: "存查",
-                anc: "公告", web: "張貼" };
-// 整批處理的分頁（陳核／存查／公告／張貼）看的是「整批會怎樣」而不是單筆,所以
-// 收掉左邊清單、右邊佔滿。
-const BATCH = (t) => t === "send" || t === "arch" || t === "anc" || t === "web";
+                anc: "公告", web: "張貼", set: "設定" };
+// 整批處理的分頁（陳核／存查／公告／張貼）與設定頁看的都不是單筆,所以收掉左邊
+// 清單、右邊佔滿。
+const BATCH = (t) => t === "send" || t === "arch" || t === "anc" || t === "web"
+                  || t === "set";
 
 function setTab(t) {
   TAB = t;
-  ["live", "old", "send", "arch", "anc", "web"].forEach(k =>
+  ["live", "old", "send", "arch", "anc", "web", "set"].forEach(k =>
     el("tab" + k).className = t === k ? "on" : "click");
   el("title").textContent = TITLE[t];
   // 換頁等於換清單,原本選的那筆多半不在新清單裡,右邊一併清掉免得對不上。
@@ -365,6 +414,7 @@ function setTab(t) {
   if (t === "arch") return loadArch();
   if (t === "anc") return loadAnc();
   if (t === "web") return loadWeb();
+  if (t === "set") return loadSet();
   el("detail").innerHTML = '<div class="empty">左邊點一筆公文。</div>';
   drawList();
 }
@@ -375,6 +425,7 @@ el("tabsend").onclick = () => setTab("send");
 el("tabarch").onclick = () => setTab("arch");
 el("tabanc").onclick = () => setTab("anc");
 el("tabweb").onclick = () => setTab("web");
+el("tabset").onclick = () => setTab("set");
 
 const KB = (n) => n >= 1048576 ? (n / 1048576).toFixed(1) + " MB"
                  : n >= 1024 ? Math.round(n / 1024) + " KB" : n + " B";
@@ -770,10 +821,22 @@ function archItem(it, i, kind) {
       : `<p class="mut">前面那筆會讓整批停下來，所以這次輪不到它。
            它本身沒問題（分類「${esc(it.分類)}」→ 檔號 ${esc(it.檔號)}），
            把前面那筆處理掉再跑一次就會做到。</p>`;
+  // danger 那一列要給人一條出路。這一頁**不能「跳過某一筆」** ——
+  // process_document_closure 每輪只做清單最上面那筆，不能指定，那是系管師的
+  // 檔案不改。所以卡住時唯一能做的是把「說謊的標記」清掉，讓它變回一般待歸檔
+  // 公文，整批就跑得動（2026-08-14 實跑撞到:PIN 視窗沒出現、簽章沒完成，
+  // 但驗證誤判成功寫了標記，於是整批被自己的閘門擋死，而畫面上無路可走）。
+  const fix = (it.狀態 === "danger" && kind !== "ask")
+    ? `<div class="foot" style="margin-top:8px">
+         <button class="risk" data-unmark="${esc(it.文號)}">edoc 上其實沒歸檔 → 刪掉這個標記</button>
+         <span class="mut">刪掉之後它會變回「會歸檔」，整批就跑得動。
+           真的歸檔成功時程式會重新寫一份，所以刪錯不會永久失去什麼。</span>
+       </div>`
+    : "";
   return `<div class="si ${cls}">
     <div class="sh"><span class="idx">${i}.</span>
       <span class="no">${esc(it.文號)}</span>${kind === "ask" ? "" : tag}
-      <span class="su">${esc(it.主旨) || "（讀不到主旨）"}</span></div>${body}</div>`;
+      <span class="su">${esc(it.主旨) || "（讀不到主旨）"}</span></div>${body}${fix}</div>`;
 }
 
 function drawArch() {
@@ -830,6 +893,11 @@ function drawArch() {
     <div class="note">主管還沒核決「如擬」的公文<b>這裡看不出來</b>（那是 edoc 上的
       狀態，磁碟沒有痕跡）。真的跑下去遇到那種，它會被跳過、連兩輪之後整批停下 ——
       不是壞掉，是那份公文還沒審完。</div>
+    <div class="note"><b>為什麼不能只勾要歸的那幾筆？</b>
+      歸檔程式每一輪只做待結案清單<b>最上面那一筆</b>，沒辦法指定跳過中間某一份
+      （那是系管師那條路的做法，不改）。所以第 1 筆卡住＝整批卡住。
+      解法是把第 1 筆處理掉:<b>要人工確認</b>那種按上面那顆清掉假標記；
+      其他卡住的就自己在 edoc 辦掉那一筆，再按「重讀清單」。</div>
     <div class="sendbar">
       <button id="doarch" class="big risk" ${
         p.可跑 && cr.ok ? "" : "disabled"}>歸檔這 ${go.length} 筆</button>
@@ -840,6 +908,8 @@ function drawArch() {
     </div>`;
   el("doarch").onclick = askArch;
   el("rescan").onclick = startScan;
+  [...document.querySelectorAll("[data-unmark]")].forEach(b =>
+    b.onclick = () => unmark(b));
   // 上面那顆與底下那顆是同一個動作,狀態要一起走。
   const top = el("doarchtop");
   top.hidden = false;
@@ -847,6 +917,32 @@ function drawArch() {
   top.disabled = !(p.可跑 && cr.ok);
   top.title = cr.ok ? (p.不可跑原因 || "會再問一次才真的歸檔") : (cr.說明 || "");
   top.onclick = askArch;
+}
+
+// 刪掉一個說謊的存查標記。刪檔不可逆（雖然真的歸檔成功時會重寫），
+// 而且刪錯的方向是「同一份公文再送一次歸檔簽章」—— 那正是 2026-07-16 的事故。
+// 所以問得很具體:要人先去 edoc 看過。
+async function unmark(btn) {
+  const doc = btn.dataset.unmark;
+  if (!confirm(
+      `${doc}\n\n`
+      + "確定 edoc 上這份**還沒**存查完成嗎？\n\n"
+      + "磁碟上有存查完成標記，但它還在待結案清單裡，兩邊對不上。\n"
+      + "· 如果 edoc 上其實已經歸檔了 → 請按取消，改按「重讀清單」就好。\n"
+      + "· 如果 edoc 上還沒歸檔 → 按確定刪掉那個標記，這一批就跑得動。\n\n"
+      + "刪錯的後果是同一份公文被再送一次歸檔簽章，所以請先去 edoc 看過。")) return;
+  btn.disabled = true;
+  btn.textContent = "處理中…";
+  try {
+    const j = await (await fetch("/api/archive/clear-marker", {
+      method: "POST", body: JSON.stringify({ 確認: true, 文號: doc })
+    })).json();
+    if (!j.ok) { btn.disabled = false; return say(j.錯誤, "err"); }
+    say(`已刪掉 ${j.刪了.join("、")} —— 清單要重讀一次才會更新。`, "ok");
+  } catch (e) { btn.disabled = false; return say("刪不掉：" + e, "err"); }
+  // 刪完清單判定就變了，後端已把快取作廢;這裡直接重讀畫面（會回到
+  // 「還沒讀過清單」，提示按「讀待結案清單」）。
+  await loadArch();
 }
 
 async function startScan() {
@@ -1218,6 +1314,341 @@ el("webyes").onclick = async () => {
   watch("web");
 };
 
+// ── 設定頁 ────────────────────────────────────────────────────────────────
+//
+// 兩區:**個人**（PIN、校網帳密、API key）與**共用**（發布單位、發布者、摘要要叫
+// 哪些 AI…）。承辦人的原話:「KEY 不是應該個人填個人的」—— 這套工具會交給下一個
+// 人，密鑰跟著人不跟著工具。
+//
+// **個人區看不到值**:後端只給「已填／未填」，畫面上永遠是空的輸入框。
+// 看得到就會被截圖、被貼進交接檔，而這個 repo 是 public。留空 = 不改。
+//
+// `pin` 打錯會在下次收文時鎖卡（要跑戶政事務所），所以那一欄要再確認一次。
+let SET = null;
+
+async function loadSet() {
+  say("讀取中…");
+  el("detail").innerHTML = '<div class="empty">讀取中…</div>';
+  try {
+    const j = await (await fetch("/api/settings/plan")).json();
+    if (!j.ok) { el("detail").innerHTML = ""; return say(j.錯誤, "err"); }
+    SET = j;
+    drawSet();
+    say("");
+  } catch (e) { say("連不上程式，是不是關掉了？", "err"); }
+}
+
+function cfgRow(f) {
+  const hint = (f.說明 || "") + (f.哪裡拿 ? `<br>${esc(f.哪裡拿)}` : "");
+  if (f.祕密) {
+    return `<label for="cfg-${f.鍵}">${esc(f.標題)}</label>
+      <div class="v">
+        <span class="${f.已填 ? "filled" : "empty2"}">${
+          f.已填 ? "✓ 已填" : "未填"}</span>
+        <input id="cfg-${f.鍵}" type="password" autocomplete="new-password"
+          placeholder="${f.已填 ? "留空 = 不改；要換就輸入新的" : "還沒填"}">
+        <div class="hint">${hint}</div>
+      </div>`;
+  }
+  return `<label for="cfg-${f.鍵}">${esc(f.標題)}</label>
+    <div class="v">
+      <input id="cfg-${f.鍵}" type="text" value="${esc(f.值)}">
+      <div class="hint">${hint}</div>
+    </div>`;
+}
+
+function drawSet() {
+  const fs = SET.欄位 || [], specs = SET.規格檔 || [];
+  const 個人 = fs.filter(f => f.區 === "個人"), 共用 = fs.filter(f => f.區 === "共用");
+  // 「多數人不用填」的收進摺頁 —— 2026-08-14 同事看到 API key 就問「API 是什麼」，
+  // 那是把它擺太顯眼的錯，不是他的問題。
+  const 進階 = 個人.filter(f => f.進階);
+  el("count").textContent = "";
+  const warns = (SET.提醒 || []).map(w =>
+    `<div class="note">⚠️ ${esc(w)}</div>`).join("");
+  el("detail").innerHTML = `
+    <div class="safe">這一頁<b>只改設定檔，不會送出任何東西</b> ——
+      改的是下次跑文會用到的 <code>env.env</code>。</div>
+    ${SET.存在 ? "" : `<div class="note">⚠️ 還沒有 <code>env.env</code>。
+      按下儲存會從 <code>env_example.env</code> 複製一份再填。</div>`}
+    ${warns}
+    <div class="box">
+      <p class="fld">個人的 <span>跟著人走 · 交接給下一個人時這幾格要留空</span></p>
+      <p class="mut" style="margin:0 0 10px">畫面<b>不會顯示現在填的內容</b>，
+        只顯示有沒有填 —— 看得到就會被截圖。留空 = 不改，要換就直接輸入新的。</p>
+      <div class="cfg">${個人.filter(f => !f.進階).map(cfgRow).join("")}</div>
+      ${進階.length ? `<details class="fold" style="margin-top:14px">
+        <summary>AI 服務的金鑰${進階.every(f => !f.已填)
+            ? '<span class="live">都沒填，這樣就對了</span>' : ""}
+          <span class="sub">　多數人不用填 · 點開才看得到</span></summary>
+        <p class="mut" style="margin:6px 0 10px">
+          <b>「API 金鑰」是什麼？</b> 就是向外面的 AI 服務借用額度時，
+          要出示的一組密碼（像借書證）。<b>這台電腦如果裝了 Claude Code 並登入過，
+          這兩格空著就對了</b> —— 摘要會用那個登入，不必跟任何人借額度。<br>
+          <b>沒有 Claude Code 的話</b>（它要付費方案），最省事的是去
+          <b>aistudio.google.com/apikey</b> 申請一把**免費**金鑰填在下面，
+          再把上面「摘要要叫哪些 AI」改成 <b>aistudio</b>。免費額度對公文摘要夠用。</p>
+        <div class="cfg">${進階.map(cfgRow).join("")}</div>
+      </details>` : ""}
+    </div>
+    <div class="box">
+      <p class="fld">共用的 <span>跟著這個學校、這個職務走 · 換人接手照用</span></p>
+      <div class="cfg">${共用.map(cfgRow).join("")}</div>
+    </div>
+    ${routingBox()}
+    ${tableBox()}
+    <div class="box">
+      <p class="fld">規格檔原始檔 <span>會改 YAML／Markdown 的人才需要動這裡</span></p>
+      <p class="mut" style="margin:0 0 8px">上面兩個表單就是這些檔案裡最常改的部分。
+        其餘的（公告口氣、摘要規則）目前還是要開檔案改 ——
+        <b>改壞了程式不一定會講</b>，改之前先複製一份。</p>
+      ${specs.map(s => `<div class="spec">
+        <span class="n">${esc(s.檔名)}</span>
+        ${s.在 ? `<button data-spec="${esc(s.檔名)}">開啟</button>`
+               : '<span class="mut">找不到這個檔</span>'}</div>`).join("")}
+    </div>
+    ${(SET.其他鍵 || []).length ? `<div class="box">
+      <p class="fld">這一頁沒列到的鍵 <span>${SET.其他鍵.length} 個 ·
+        存檔時不會動它們</span></p>
+      <div class="mut">${SET.其他鍵.map(esc).join("、")}</div></div>` : ""}
+    <div class="sendbar">
+      <button id="dosave" class="big solid">儲存設定</button>
+      <span id="savemsg" class="mut">改完按這裡。下次跑文才會用到新的設定。</span>
+    </div>`;
+  [...document.querySelectorAll("[data-spec]")].forEach(b =>
+    b.onclick = () => openSpec(b));
+  bindSpecForms();
+  el("dosave").onclick = saveSet;
+}
+
+// ── 規格檔的表單 ──────────────────────────────────────────────────────────
+//
+// 承辦人 2026-08-12 的問題:「MD 檔沒在寫程式的同仁會不知道怎麼處理」。
+// 判斷還是留在 routing_flags.yaml 與 summarize_doc.md 裡（改一行行為就變一片，
+// 比寫進 Python 好），但**填的人不該需要懂 YAML 的縮排**。
+//
+// ⚠️ routing_flags.yaml 改壞的後果特別惡劣:程式讀不到就當成空的，於是
+// 「他人業務不要自動送陳核」整份失效，而畫面上什麼都不會說。所以:
+//   · 這裡用表單，不讓人碰縮排與符號
+//   · 後端寫出去之前會自己 yaml 解一次、比對過才寫
+//   · 每一段旁邊顯示「現在程式真的讀到幾筆」—— 讀到 0 筆一眼就看得出來
+const ROUTLBL = {
+  本人字別: ["這些字別＝我的業務", "照常自動送陳核。字別是公文自己帶的資料（發文字號「○○字第…號」的○○），比關鍵字準。"],
+  他人字別: ["這些字別＝他人業務", "擋下不自動送，請自行在 edoc 處理。"],
+  關鍵字: ["他人業務的主題關鍵字", "**優先於字別** —— 業務按主題分，不按來文機關分。只放明確屬於他人的詞;太泛的詞會誤擋。"],
+};
+
+function rowsEditor(kind, key, items, cols) {
+  const head = `<div class="colhead"><span>${esc(cols[0])}</span>
+    <span class="note">${esc(cols[1])}</span><span class="btnpad"></span></div>`;
+  const body = items.map((it, i) => `<div class="row">
+    <input data-f="${kind}|${esc(key)}|${i}|值" value="${esc(it.值)}">
+    <input class="note" data-f="${kind}|${esc(key)}|${i}|備註" value="${esc(it.備註)}"
+      placeholder="備註（為什麼加這一個，給下一個人看）">
+    <button data-del="${kind}|${esc(key)}|${i}">✕</button></div>`).join("");
+  return `${head}<div class="rows">${body}
+    <button class="addrow" data-add="${kind}|${esc(key)}">＋ 加一列</button></div>`;
+}
+
+function routingBox() {
+  const r = SET.他人業務 || {};
+  if (r.錯誤) return `<div class="box"><p class="fld">他人業務判斷</p>
+    <div class="note">⚠️ 讀不到:${esc(r.錯誤)}</div></div>`;
+  const live = r.生效中 || {};
+  const badge = (k) => {
+    if (live.錯誤) return `<span class="live bad">讀不到</span>`;
+    const n = live[k];
+    return `<span class="live ${n === 0 ? "bad" : ""}">程式現在讀到 ${n} 筆</span>`;
+  };
+  const lists = (r.段落 || []).filter(s => s.型別 === "清單").map(s => {
+    const [title, hint] = ROUTLBL[s.鍵] || [s.鍵, ""];
+    return `<p class="fld" style="margin-top:14px">${esc(title)}${badge(s.鍵)}
+        <span>${esc(hint)}</span></p>
+      ${rowsEditor("他人業務", s.鍵, s.項目, ["字詞", "備註"])}`;
+  }).join("");
+  const unknown = (r.段落 || []).find(s => s.鍵 === "未知字別") || { 值: "pass" };
+  const note = (r.段落 || []).find(s => s.鍵 === "說明") || { 值: "" };
+  // 這一份很少改（字別與關鍵字大半年才動一次），所以**摺起來**。
+  // 但它改壞的後果是那道保護靜靜失效，所以:
+  //   · 摺頁那一行就寫著現在讀到幾筆 —— 不用展開也看得到有沒有壞
+  //   · 讀到 0 筆或整份讀不到 → **自己展開**（收起來是為了別擋路，不是藏問題）
+  const counts = live.錯誤 ? [] : ["本人字別", "他人字別", "關鍵字"].map(k => live[k]);
+  const broken = live.錯誤 || counts.some(n => !n);
+  const sum = live.錯誤
+    ? `<span class="live bad">整份讀不到</span>`
+    : `<span class="live ${broken ? "bad" : ""}">現在生效:自己 ${counts[0]}
+       ／他人 ${counts[1]}　關鍵字 ${counts[2]}</span>`;
+  return `<div class="box">
+    <details class="fold" ${broken ? "open" : ""}>
+      <summary>他人業務判斷${sum}
+        <span class="sub">　命中的公文不會自動送陳核 · 很少需要改</span></summary>
+      <p class="mut" style="margin:0">有些公文分到你手上，但業務不屬於你的組室
+        （原圖資老師離職後業務移交過來）。edoc 上看不出來，所以靠這份清單。
+        <b>這裡改壞的話那道保護會靜靜失效</b>，所以用表單填、存檔前程式會自己驗過。</p>
+      ${lists}
+      <p class="fld" style="margin-top:16px">都沒命中時怎麼辦</p>
+      <div class="row" style="max-width:420px">
+        <select id="unknown-mode" style="flex:1;padding:6px;border-radius:6px;
+          border:1px solid var(--line);font-family:inherit;font-size:13px">
+          <option value="pass" ${unknown.值 === "pass" ? "selected" : ""}
+            >pass — 照常自動送陳核</option>
+          <option value="block" ${unknown.值 === "block" ? "selected" : ""}
+            >block — 一律擋下先問人</option>
+        </select></div>
+      <p class="fld" style="margin-top:14px">命中時畫面上顯示的說明</p>
+      <div class="row"><input id="rout-note" value="${esc(note.值)}"></div>
+    </details>
+  </div>`;
+}
+
+function tableBox() {
+  const t = SET.對應表 || {};
+  if (t.錯誤 || !t.有這張表) return `<div class="box">
+    <p class="fld">存查分類對應表</p>
+    <div class="note">⚠️ ${esc(t.錯誤 || "在 summarize_doc.md 裡找不到那張表")}</div>
+  </div>`;
+  const rows = (t.列 || []).map((r, i) => `<div class="row">
+    <div class="ord">
+      <button data-up="${i}" ${i === 0 ? "disabled" : ""}>▲</button>
+      <button data-down="${i}" ${i === t.列.length - 1 ? "disabled" : ""}>▼</button>
+    </div>
+    <input data-f="對應表|${i}|相關字詞" value="${esc(r.相關字詞)}">
+    <input data-f="對應表|${i}|存查分類" value="${esc(r.存查分類)}">
+    <input data-f="對應表|${i}|承辦方式" value="${esc(r.承辦方式)}">
+    <input data-f="對應表|${i}|校網同步顯示至" value="${esc(r.校網同步顯示至)}">
+    <button data-del="對應表||${i}">✕</button></div>`).join("");
+  return `<div class="box">
+    <p class="fld">存查分類對應表 <span>愈上面愈優先 · 原始檔 summarize_doc.md</span></p>
+    <p class="mut" style="margin:0">這張表決定一份公文的<b>存查分類、要不要陳會、
+      貼上校網時同步到哪些分類</b>。同一份公文若中兩列，<b>以上面那一列為準</b> ——
+      所以順序有意義，用 ▲▼ 調。多個分類用 ＋ 串（例:課外活動+硏習資訊）。</p>
+    <div class="colhead"><span>相關字詞</span><span>存查分類</span>
+      <span>承辦方式</span><span>校網同步顯示至</span><span class="btnpad"></span></div>
+    <div class="rows">${rows}
+      <button class="addrow" data-add="對應表|">＋ 加一列</button></div>
+    <p class="mut" style="margin:8px 0 0">承辦方式填「陳會」= 要送陳核;填 none =
+      不用。存查分類判不出來的公文會寫「待確認」，歸檔時讀不到檔號會安全停下，
+      不會亂歸。</p>
+  </div>`;
+}
+
+// 表單的改動先進記憶體（SET），按「儲存」才一起送 —— 一格一存會在 YAML 半成品
+// 狀態下寫檔，而那個檔壞掉就是整份保護失效。
+function bindSpecForms() {
+  [...document.querySelectorAll("[data-f]")].forEach(inp => {
+    inp.oninput = () => {
+      const [kind, key, idx, field] = inp.dataset.f.split("|");
+      if (kind === "對應表") SET.對應表.列[+key][idx] = inp.value;
+      else {
+        const s = SET.他人業務.段落.find(x => x.鍵 === key);
+        s.項目[+idx][field] = inp.value;
+      }
+    };
+  });
+  [...document.querySelectorAll("[data-del]")].forEach(b =>
+    b.onclick = () => {
+      const [kind, key, idx] = b.dataset.del.split("|");
+      if (kind === "對應表") SET.對應表.列.splice(+idx, 1);
+      else SET.他人業務.段落.find(x => x.鍵 === key).項目.splice(+idx, 1);
+      drawSet();
+    });
+  [...document.querySelectorAll("[data-add]")].forEach(b =>
+    b.onclick = () => {
+      const [kind, key] = b.dataset.add.split("|");
+      if (kind === "對應表")
+        SET.對應表.列.push({ 相關字詞: "", 存查分類: "", 承辦方式: "陳會",
+                            校網同步顯示至: "" });
+      else SET.他人業務.段落.find(x => x.鍵 === key).項目.push({ 值: "", 備註: "" });
+      drawSet();
+    });
+  const move = (i, d) => {
+    const L = SET.對應表.列;
+    if (i + d < 0 || i + d >= L.length) return;
+    [L[i], L[i + d]] = [L[i + d], L[i]];
+    drawSet();
+  };
+  [...document.querySelectorAll("[data-up]")].forEach(b =>
+    b.onclick = () => move(+b.dataset.up, -1));
+  [...document.querySelectorAll("[data-down]")].forEach(b =>
+    b.onclick = () => move(+b.dataset.down, 1));
+}
+
+async function saveSpec() {
+  const r = SET.他人業務 || {}, t = SET.對應表 || {};
+  const payload = {};
+  if (r.段落) {
+    payload.他人業務 = {
+      未知字別: el("unknown-mode").value,
+      說明: el("rout-note").value,
+    };
+    r.段落.filter(s => s.型別 === "清單").forEach(s => {
+      payload.他人業務[s.鍵] = s.項目;
+    });
+  }
+  if (t.有這張表) payload.對應表 = t.列;
+  const m = el("savemsg");
+  m.className = "mut"; m.textContent = "儲存中…";
+  try {
+    const j = await (await fetch("/api/spec/save", {
+      method: "POST", body: JSON.stringify(payload)
+    })).json();
+    if (!j.ok) { m.className = "msg err"; m.textContent = j.錯誤; return false; }
+    if (j.改了.length) say(`已存:${j.改了.join("、")}`, "ok");
+    return true;
+  } catch (e) {
+    m.className = "msg err"; m.textContent = "存不進去：" + e;
+    return false;
+  }
+}
+
+async function openSpec(btn) {
+  const t = btn.textContent;
+  btn.textContent = "開啟中…";
+  try {
+    const j = await (await fetch("/api/settings/open", {
+      method: "POST", body: JSON.stringify({ 檔名: btn.dataset.spec })
+    })).json();
+    say(j.ok ? "已用預設程式開啟。" : j.錯誤, j.ok ? "ok" : "err");
+  } catch (e) { say("開不起來：" + e, "err"); }
+  btn.textContent = t;
+}
+
+async function saveSet() {
+  const fs = SET.欄位 || [], vals = {};
+  fs.forEach(f => {
+    const box = el("cfg-" + f.鍵);
+    if (!box) return;
+    const v = box.value;
+    // 密鑰:空白 = 不改（畫面本來就看不到現值，空白不能當成「清空」——
+    // 那會讓「只是沒動它」變成「把 PIN 刪掉」）。
+    if (f.祕密) { if (v.trim()) vals[f.鍵] = v.trim(); }
+    else if (v !== (f.值 || "")) vals[f.鍵] = v;
+  });
+  const keys = Object.keys(vals);
+  // 規格檔的表單跟 env.env 是兩個檔，但對使用者是同一顆「儲存設定」。
+  // 先存規格檔（它會自己驗，驗不過就整批退回），再存 env.env。
+  const specOk = await saveSpec();
+  if (!specOk) return;
+  if (!keys.length) { await loadSet(); return; }
+  // PIN 打錯會鎖卡（要跑戶政事務所解卡）—— 這一顆值得多問一句。
+  if (vals.pin && !confirm(
+      "要改自然人憑證 PIN 嗎？\n\n"
+      + "打錯的話，下次收新公文會用錯的 PIN 去登入。"
+      + "自然人憑證連續輸錯會鎖卡，要跑戶政事務所解卡。\n\n"
+      + "確定現在輸入的是對的嗎？")) return say("沒有存。");
+  const m = el("savemsg");
+  m.className = "mut"; m.textContent = "儲存中…";
+  try {
+    const j = await (await fetch("/api/settings/save", {
+      method: "POST", body: JSON.stringify({ 值: vals })
+    })).json();
+    if (!j.ok) { m.className = "msg err"; m.textContent = j.錯誤; return; }
+    // 回應只帶鍵名,不帶值 —— 畫面上也只講改了哪幾項。
+    say(j.改了.length ? `已存:${j.改了.join("、")}` : "值沒有變，沒有寫入。", "ok");
+    await loadSet();
+  } catch (e) { m.className = "msg err"; m.textContent = "存不進去：" + e; }
+}
+
 // ── 背景工作:收新公文 / 送陳核 / 讀清單 / 歸檔 / 產文案 / 張貼 ────────────
 // 兩件事共用同一個進度面板與輪詢 —— 都是操作同一個 Chrome、都只能等它跑完，
 // 介面沒有理由長成兩套。後端 Job 也互斥，同一時間只會有一支在跑。
@@ -1333,7 +1764,7 @@ async function tick() {
 // 要重讀 edoc 得按頁面裡的「重讀清單」。誤觸重新整理不該去動瀏覽器。
 el("reload").onclick = () => TAB === "arch" ? loadArch()
   : TAB === "send" ? loadSend() : TAB === "anc" ? loadAnc()
-  : TAB === "web" ? loadWeb() : load();
+  : TAB === "web" ? loadWeb() : TAB === "set" ? loadSet() : load();
 load();
 // 萬一頁面重整時工作還在跑,接回去繼續看。六支都要問 —— 重整那一刻正在跑的
 // 可能是送陳核或歸檔，接錯支就會盯著一個沒在動的面板。

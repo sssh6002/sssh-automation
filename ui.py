@@ -565,6 +565,49 @@ def web_payload():
             "chrome": {"ok": busy is None, "說明": busy}}, note
 
 
+# ── 設定頁 ─────────────────────────────────────────────────────────────────
+#
+# 分兩區:**個人**（PIN、校網帳密、API key）與**共用**（發布單位、發布者、摘要
+# 要叫哪些 AI…）。承辦人 2026-08-12 的原話:「KEY 不是應該個人填個人的」——
+# 這套工具會交給下一個人，密鑰跟著人不跟著工具。所以:
+#
+#   · **密鑰的值不回傳前端**（`env_config.state()` 只給「有沒有填」）。看得到就會
+#     被截圖、被貼進交接檔，而這個 repo 是 public。
+#   · 存檔的回應只回**鍵名**，不回值;log 也不印值。
+#   · `pin` 最敏感 —— 打錯會在下次收文時鎖卡（要跑戶政事務所），所以介面那顆
+#     要再問一次，而且只收數字。
+#
+# 規格檔（判斷都寫在那幾份裡）也放這一頁的入口 —— 現在得自己去翻檔案。
+
+SPEC_FILES = ["summarize_doc.md", "announce_doc.md", "routing_flags.yaml"]
+
+
+def settings_payload():
+    """設定頁要的東西。**不含任何密鑰的值。**
+
+    規格檔那兩份判斷（他人業務、存查分類對應表）一併變成**表單**送出去 ——
+    承辦人 2026-08-12 的問題:「MD 檔沒在寫程式的同仁會不知道怎麼處理」。
+    而 `routing_flags.yaml` 改壞的後果是**靜靜失效**（`routing_flags()` 讀不到就
+    回全空 = 不攔任何東西），所以那份尤其不能叫人去改原始檔。
+    """
+    import env_config as ec
+    import spec_forms as sf
+    specs = []
+    for n in SPEC_FILES:
+        p = os.path.join(_BASE_DIR, n)
+        specs.append({"檔名": n, "路徑": p, "在": os.path.isfile(p)})
+    out = {**ec.state(), "規格檔": specs}
+    try:
+        out["他人業務"] = sf.routing_state()
+    except Exception as e:
+        out["他人業務"] = {"錯誤": f"{type(e).__name__}: {e}"}
+    try:
+        out["對應表"] = sf.table_state()
+    except Exception as e:
+        out["對應表"] = {"錯誤": f"{type(e).__name__}: {e}"}
+    return out
+
+
 # ── 備料（呼叫 py main.py 4）────────────────────────────────────────────────
 #
 # 用 subprocess 跑，**完全不改系管師的程式碼** —— 呼叫不等於修改。
@@ -778,6 +821,11 @@ class Handler(BaseHTTPRequestHandler):
             except FileNotFoundError:
                 return self._json({"ok": False,
                                    "錯誤": "還沒有任何公文。請先按「收新公文」。"})
+            except Exception as e:
+                return self._json({"ok": False, "錯誤": f"{type(e).__name__}: {e}"})
+        if path == "/api/settings/plan":
+            try:
+                return self._json({"ok": True, **settings_payload()})
             except Exception as e:
                 return self._json({"ok": False, "錯誤": f"{type(e).__name__}: {e}"})
         if path == "/api/open":
@@ -1022,6 +1070,125 @@ class Handler(BaseHTTPRequestHandler):
                 return self._json({"ok": False, "錯誤": f"{type(e).__name__}: {e}"})
             return self._json({"ok": True, "數量": len(names)})
 
+        if path == "/api/archive/clear-marker":
+            # 刪掉一個**說謊的**存查完成標記。
+            #
+            # 為什麼需要這顆（2026-08-14 實跑撞到）:歸檔第 1 筆時 pinCode 視窗
+            # 15 秒沒出現、簽章根本沒完成，但 `document_closure` 那道
+            # 「文號從待結案可見列消失」的驗證在**存查表單還開著**時必然成立
+            # → 誤判成功 → 寫了 `已存查.txt`。於是磁碟說辦完了、edoc 說還在待結案。
+            # 那筆從此被 `plan()` 判成 danger（坑 #16 的閘門，防重複簽章），
+            # **整批不跑** —— 而承辦人沒有任何辦法在介面上解開。
+            #
+            # ⚠️ 這一頁不能「跳過第一筆」:`process_document_closure` 每輪只做清單
+            # 最上面那筆，不能指定。所以解法不是跳過，是**把那個假標記清掉**，
+            # 讓它變回一般的待歸檔公文，整批就跑得動了。
+            #
+            # 三道關卡（刪檔是不可逆的，雖然真的歸檔後會重寫一份）:
+            #  1. 沒帶「確認」不動。
+            #  2. **只准刪剛才讀到的待結案清單裡、而且狀態是 danger 的那幾筆** ——
+            #     不是任意文號。標記檔還在待結案清單裡才叫「說謊」;不在清單裡的
+            #     標記是正常的存查痕跡，刪掉會讓那份公文重跑一次歸檔。
+            #  3. 路徑一律用後端自己算的（`evaluate` 給的），不吃畫面傳來的路徑。
+            if not body.get("確認"):
+                return self._json({"ok": False, "錯誤": "缺少確認"}, 400)
+            no = str(body.get("文號") or "").strip()
+            if not no:
+                return self._json({"ok": False, "錯誤": "缺少文號"}, 400)
+            p = scan_plan()
+            if p is None:
+                return self._json({"ok": False,
+                                   "錯誤": "還沒讀過待結案清單 —— 請先按「讀待結案清單」。"})
+            hit = next((it for it in p["清單"]
+                        if it["文號"] == no and it.get("狀態") == "danger"), None)
+            if hit is None:
+                return self._json({
+                    "ok": False,
+                    "錯誤": f"{no} 不在剛才讀到的待結案清單裡，或它的狀態不是"
+                            f"「要人工確認」—— 只有那種才是說謊的標記，其餘的"
+                            f"標記是正常的存查痕跡，刪掉會讓那份公文再歸檔一次。"})
+            try:
+                import archive_batch as ab
+                paths = ab.evaluate(no).get("標記檔") or []
+            except Exception as e:
+                return self._json({"ok": False, "錯誤": f"{type(e).__name__}: {e}"})
+            if not paths:
+                return self._json({"ok": False, "錯誤": f"{no} 現在沒有存查標記檔。"})
+            gone, failed = [], []
+            for fp in paths:
+                try:
+                    os.remove(fp)
+                    gone.append(os.path.basename(fp))
+                except OSError as e:
+                    failed.append(f"{os.path.basename(fp)}（{e}）")
+            if failed:
+                return self._json({"ok": False,
+                                   "錯誤": "刪不掉:" + "、".join(failed)})
+            print(f"[ui] 已刪掉假的存查標記:{no} → {'、'.join(gone)}")
+            # 清單的判定變了，快取那份作廢 —— 不然畫面還是舊的 danger 狀態，
+            # 而送出那道關卡會拿它比對。要人重讀一次，兩邊才是同一份。
+            SCAN.lines = []
+            return self._json({"ok": True, "刪了": gone})
+
+        if path == "/api/settings/save":
+            # 這一頁不送出任何東西，但寫的是**下次跑文會吃的設定**（含 PIN）。
+            # 兩道:
+            #  1. 只收設定頁自己那張表裡的鍵（`env_config._check` 會擋）——
+            #     誰亂 POST 一個鍵進來都不會被寫進 env.env。
+            #  2. 回應**只回鍵名，不回值**;錯誤訊息也不帶值。密鑰不出畫面、
+            #     不進 log（這個 repo 是 public，畫面會被截圖）。
+            import env_config as ec
+            vals = body.get("值")
+            if not isinstance(vals, dict) or not vals:
+                return self._json({"ok": False, "錯誤": "沒有要改的設定"}, 400)
+            try:
+                changed = ec.write({str(k): str(v) for k, v in vals.items()})
+            except ec.Rejected as e:
+                return self._json({"ok": False, "錯誤": str(e)})
+            except Exception as e:
+                return self._json({"ok": False, "錯誤": f"{type(e).__name__}: {e}"})
+            if changed:
+                print(f"[ui] 設定已更新:{'、'.join(changed)}")   # 只印鍵名
+            return self._json({"ok": True, "改了": changed})
+
+        if path == "/api/spec/save":
+            # 規格檔的表單存檔。判斷本身還是留在那兩份檔案裡（改一行行為就變一片，
+            # 比寫進 Python 好），這裡只是讓不寫程式的人也改得動。
+            #
+            # ⚠️ `spec_forms` 會**在寫出去之前自己驗一次**（yaml 解得開、而且解出來
+            # 跟填的一樣）。驗不過就整批不寫 —— `routing_flags.yaml` 讀壞的後果是
+            # 那道「他人業務不自動送陳核」的保護靜靜失效，寧可存不進去。
+            import spec_forms as sf
+            changed = []
+            try:
+                if isinstance(body.get("他人業務"), dict):
+                    changed += sf.routing_write(body["他人業務"])
+                if isinstance(body.get("對應表"), list):
+                    if sf.table_write(body["對應表"]):
+                        changed.append("存查分類對應表")
+            except sf.Rejected as e:
+                return self._json({"ok": False, "錯誤": str(e)})
+            except Exception as e:
+                return self._json({"ok": False, "錯誤": f"{type(e).__name__}: {e}"})
+            if changed:
+                print(f"[ui] 規格檔已更新:{'、'.join(changed)}")
+            return self._json({"ok": True, "改了": changed})
+
+        if path == "/api/settings/open":
+            # 規格檔用系統預設程式開。**白名單** —— 不接受任意路徑，
+            # 不然這個位址就變成「用瀏覽器叫本機開任何檔案」。
+            name = str(body.get("檔名") or "")
+            if name not in SPEC_FILES:
+                return self._json({"ok": False, "錯誤": "不是規格檔"}, 400)
+            p = os.path.join(_BASE_DIR, name)
+            if not os.path.isfile(p):
+                return self._json({"ok": False, "錯誤": f"找不到 {name}"})
+            try:
+                os.startfile(p)                 # noqa: S606 — Windows 開預設編輯器
+            except Exception as e:
+                return self._json({"ok": False, "錯誤": f"開不起來:{e}"})
+            return self._json({"ok": True})
+
         if path == "/api/open-folder":
             d = str(body.get("目錄") or "")
             if not os.path.isdir(d):
@@ -1035,14 +1202,61 @@ class Handler(BaseHTTPRequestHandler):
         self._json({"ok": False, "錯誤": "未知的位址"}, 404)
 
 
+def already_running():
+    """`127.0.0.1:PORT` 上已經有一個介面在服務了嗎。
+
+    ⚠️ **不能靠「bind 會失敗」來判斷。** `HTTPServer.allow_reuse_address = 1`，
+    而 Windows 的 SO_REUSEADDR 允許**兩個 socket 綁同一個埠**（跟 Linux 相反）——
+    所以第二次啟動不但不報錯，還會兩個服務搶同一個埠，誰收到請求是看運氣。
+    2026-08-14 實測就是這樣默默起了第二個。所以改成**啟動前先連連看**。
+    """
+    import socket
+    try:
+        with socket.socket() as s:
+            s.settimeout(0.5)
+            return s.connect_ex((HOST, PORT)) == 0
+    except OSError:
+        return False
+
+
 def main():
     if not os.path.isfile(PAGE):
         print(f"[ui] 找不到頁面檔 {PAGE}")
         raise SystemExit(1)
-    srv = ThreadingHTTPServer((HOST, PORT), Handler)
     url = f"http://{HOST}:{PORT}/"
-    print(f"[ui] 介面已啟動：{url}")
-    print(f"[ui] 只有這台電腦連得到。要關掉請按 Ctrl+C。")
+    if already_running():
+        # 最常見的原因:**已經有一個介面在跑**（點了兩次捷徑）。
+        # 他要的其實只是「把那一頁打開」，不是再開一個服務。
+        print()
+        print("=" * 60)
+        print(f" 已經有一個介面在跑了（{HOST}:{PORT} 有人在服務）。")
+        print(f" 不用再開一個 —— 直接用這一頁就好:{url}")
+        print(" 幫你打開了。")
+        print(" 如果打開的是別的東西，那就是別的程式佔用了這個埠，")
+        print(" 把那個程式關掉再點一次。")
+        print("=" * 60)
+        try:
+            webbrowser.open(url)
+        except Exception:
+            pass
+        raise SystemExit(0)         # 不是錯誤，別讓啟動.bat 跳紅字
+    srv = ThreadingHTTPServer((HOST, PORT), Handler)
+    print()
+    print("=" * 60)
+    print(" 介面已啟動 —— 瀏覽器會自己打開，沒開的話手動輸入這個網址:")
+    print(f"   {url}")
+    print()
+    print(" ⚠️ 這個黑色視窗**就是程式本體，不要關掉**。")
+    print("    關掉它，網頁那一頁就跟著死了（畫面上不會有任何提示）。")
+    print("    要收工請在這個視窗按 Ctrl+C，或直接關掉也行 —— 但要記得")
+    print("    下次還是回來點「啟動.bat」。")
+    print(" 只有這台電腦連得到，別人連不進來。")
+    print("=" * 60)
+    # 這兩句在這裡講，不寫進 啟動.bat —— 那個檔只能放 ASCII（cmd 用系統
+    # 字碼頁讀 .bat，中文會把整個檔解析壞;2026-08-12 實測 @echo off 被吃成 cho）。
+    print(f"[ui] 提醒：審核表（{rs.sheet_path()}）如果正用 Excel 開著，"
+          f"勾選與擬辦會存不進去 —— 請先關掉 Excel。")
+    print(f"[ui] 第一次使用請先到「設定」頁填自己的 PIN 與校網帳密。")
     threading.Timer(0.6, lambda: webbrowser.open(url)).start()
     try:
         srv.serve_forever()

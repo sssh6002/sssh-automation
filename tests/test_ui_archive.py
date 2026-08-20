@@ -275,3 +275,62 @@ def test_jobs_share_one_lock():
 def test_hud_knows_archive_job():
     assert prep_hud._parse_args(["--job=archive"])[3] == "archive"
     assert "可以動滑鼠" in prep_hud.DONE_LABEL["archive"]
+
+
+# ── 說謊的存查標記（2026-08-14 實跑撞到）─────────────────────────────────
+#
+# 歸檔第 1 筆時 pinCode 視窗 15 秒沒出現、簽章根本沒完成，但
+# `document_closure` 那道「文號從待結案可見列消失」的驗證在**存查表單還開著**
+# 時必然成立 → 誤判成功 → 寫了 `已存查.txt`。於是磁碟說辦完、edoc 說還在待結案，
+# 那筆被 plan() 判成 danger（坑 #16 的閘門）→ **整批不跑**，而畫面上無路可走。
+#
+# 這一頁**不能跳過某一筆**（歸檔只做清單最上面那筆），所以出路是清掉假標記。
+
+def _danger_plan(monkeypatch, doc="MWAA0001"):
+    """假裝剛讀完清單，而且那一筆是 danger。"""
+    import archive_batch as ab
+    monkeypatch.setattr(ui, "scan_plan", lambda: {
+        "清單": [{"文號": doc, "狀態": "danger", "擋下原因": "標記對不上"}],
+        "會歸檔": [], "可跑": False, "不可跑原因": "清單裡有 1 筆狀態對不上",
+        "警告": []})
+    return ab
+
+
+def test_clear_marker_needs_confirmation(srv, monkeypatch, tmp_path):
+    _danger_plan(monkeypatch)
+    r = _post(srv, "/api/archive/clear-marker", {"文號": "MWAA0001"})
+    assert r["ok"] is False and "確認" in r["錯誤"]
+
+
+def test_clear_marker_only_for_danger_rows(srv, monkeypatch):
+    """只准刪「還在待結案清單裡、而且狀態是 danger」的那幾筆。
+
+    不在清單裡的存查標記是**正常的存查痕跡** —— 刪掉會讓那份公文再歸檔一次，
+    而重複歸檔簽章正是 2026-07-16 的事故。
+    """
+    _danger_plan(monkeypatch, doc="MWAA0001")
+    r = _post(srv, "/api/archive/clear-marker",
+              {"確認": True, "文號": "MWAA0002"})       # 不在清單裡
+    assert r["ok"] is False and "不在" in r["錯誤"]
+
+
+def test_clear_marker_refuses_without_scan(srv, monkeypatch):
+    monkeypatch.setattr(ui, "scan_plan", lambda: None)
+    r = _post(srv, "/api/archive/clear-marker",
+              {"確認": True, "文號": "MWAA0001"})
+    assert r["ok"] is False and "讀待結案清單" in r["錯誤"]
+
+
+def test_clear_marker_deletes_and_invalidates_the_cached_list(
+        srv, monkeypatch, tmp_path):
+    """真的刪掉檔案，而且把剛才讀到的清單作廢（判定變了，畫面要重讀）。"""
+    ab = _danger_plan(monkeypatch)
+    mark = tmp_path / "29204920_1153200444已存查.txt"
+    mark.write_text("x", encoding="utf-8")
+    monkeypatch.setattr(ab, "evaluate", lambda no: {"標記檔": [str(mark)]})
+    ui.SCAN.lines = ["舊的清單"]
+    r = _post(srv, "/api/archive/clear-marker",
+              {"確認": True, "文號": "MWAA0001"})
+    assert r["ok"] is True
+    assert not mark.exists()
+    assert ui.SCAN.lines == []

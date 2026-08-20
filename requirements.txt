@@ -1,0 +1,21 @@
+# ASCII ONLY - DO NOT PUT CHINESE IN THIS FILE.
+# pip decodes this file with the SYSTEM locale encoding (cp950 on a
+# Traditional-Chinese Windows), not UTF-8. A Chinese comment here crashes
+# pip with UnicodeDecodeError on machines whose pip is older than ~25.x.
+# Tested the hard way on 2026-08-14: worked here (pip 26.1), died on a
+# colleague's PC (pip 24.2), and the traceback points at pip, not at us.
+# The Chinese explanation of what each package is for lives in doctor.py
+# (PACKAGES) and in the setup guide .md file.
+# tests/test_installer.py fails if non-ASCII creeps back in.
+
+openpyxl        # review sheet (.xlsx) read/write - WITHOUT THIS NOTHING WORKS
+selenium        # drives Chrome: fetch / submit / archive / publish
+pyyaml          # reads routing_flags.yaml (the "not my business" list)
+pywin32         # takes over the KdApp export dialog while downloading
+
+# not required by the main flow, but safer to have
+pillow          # fallback pixel-based login (main.py 2)
+pyautogui       # same
+
+# pywinpty      # only needed for the "antigravity" summariser backend,
+#               # which has no entitlement on this account - leave it out

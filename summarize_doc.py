@@ -516,8 +516,17 @@ def _llm_summarize_claude_code(prompt_text):
             print(f"      [ERROR] subprocess claude -p 例外:{type(e).__name__}: {e}")
             return None, None
     if result.returncode != 0:
-        snippet = (result.stderr or "").strip()[:300]
-        print(f"      [ERROR] claude -p rc={result.returncode},stderr={snippet!r}")
+        # 2026-08-18:CLI 失敗時**原因寫在 stdout 的 JSON**(result 欄位),stderr 常常
+        # 是空的 —— 沒登入就是這樣:rc=1、stderr=''、stdout 有
+        # {"is_error":true,"result":"Not logged in · Please run /login"}。
+        # 舊版只印 stderr,log 上就變成一句什麼都沒講的錯誤,害人往別的方向查。
+        why = ""
+        try:
+            why = str((json.loads(result.stdout or "") or {}).get("result") or "").strip()
+        except Exception:
+            pass
+        snippet = (why or (result.stderr or "").strip())[:300]
+        print(f"      [ERROR] claude -p rc={result.returncode},原因={snippet!r}")
         return None, None
     try:
         data = json.loads(result.stdout or "")

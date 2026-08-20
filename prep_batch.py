@@ -36,6 +36,7 @@ import contextlib
 import glob
 import os
 import sys
+import time
 
 sys.stdout.reconfigure(encoding="utf-8")
 
@@ -60,6 +61,81 @@ def _noop_summarize(extract_dir):
     """
     print("      [prep_batch] 這一段先不叫 AI —— 等公文全部下載完再一次補")
     return False
+
+
+# ── 中文安裝路徑（2026-08-14，同事那台踩到）──────────────────────────────
+#
+# KdApp 的「匯出公文資料」對話框（Java Swing JFileChooser）是用**模擬實體鍵盤**
+# 填路徑的:`pending_doc_handler._send_text_vk` 把每個字元丟給 `VkKeyScanW`，
+# 而那支只認得 ASCII —— 中文字拿到 -1，程式印一行 WARN 然後 **`continue` 跳過**。
+#
+# 於是安裝在中文路徑下時，路徑會被吃掉一段:
+#     D:\D_資訊系統\自動辦文工具\document_download
+#   → D:\D_\document_download          ← 公文真的被下載到這裡
+#
+# 那支的註解自己寫著「這個路徑只用英文，夠用」—— 在承辦人的機器上成立
+# （`D:\sssh-automation`），在同事的機器上不成立。**典型的「在我這台是好的」。**
+#
+# 修法（fork 側，`pending_doc_handler.py` 一行沒改）:路徑含非 ASCII 時改走
+# **剪貼簿貼上**（Ctrl+V）—— Swing 對剪貼簿是 Unicode 安全的，而模擬鍵盤不是。
+# 純 ASCII 的路徑仍走原本那條已經驗過的鍵盤路，行為完全不變。
+#
+# ⚠️ **貼不上去就什麼都不打。** 打半截路徑的下場是公文靜靜掉到別的資料夾
+# （正是這次的症狀）；什麼都不打的話對話框不會關，原本那道「10s 內對話框沒關閉」
+# 就會叫出來 —— 失敗要看得見。
+
+_VK_V = 0x56
+
+
+def _copy_to_clipboard(text):
+    """把字串放進剪貼簿，並**讀回來確認**。回 True/False。"""
+    try:
+        import win32clipboard as cb
+    except ImportError:
+        print("      [prep_batch] 沒有 pywin32，無法用剪貼簿貼路徑。")
+        return False
+    try:
+        cb.OpenClipboard()
+        try:
+            cb.EmptyClipboard()
+            cb.SetClipboardData(cb.CF_UNICODETEXT, text)
+        finally:
+            cb.CloseClipboard()
+        cb.OpenClipboard()
+        try:
+            back = cb.GetClipboardData(cb.CF_UNICODETEXT)
+        finally:
+            cb.CloseClipboard()
+        return back == text
+    except Exception as e:
+        print(f"      [prep_batch] 剪貼簿操作失敗:{type(e).__name__}: {e}")
+        return False
+
+
+@contextlib.contextmanager
+def unicode_safe_dialog_path():
+    """路徑含中文時，改用剪貼簿把它貼進 KdApp 的對話框。用完還原。"""
+    import pending_doc_handler as pdh
+    real = pdh._send_text_vk
+
+    def patched(text, per_char_delay=0.02):
+        if all(ord(c) < 128 for c in str(text)):
+            return real(text, per_char_delay)      # 原本那條路，行為不變
+        print(f"      [prep_batch] 路徑含中文 —— 改用剪貼簿貼上（模擬鍵盤打不出中文）")
+        if not _copy_to_clipboard(str(text)):
+            print("      [prep_batch] ⛔ 剪貼簿放不進去 —— **什麼都不打**。")
+            print("      [prep_batch]    打半截路徑會讓公文靜靜掉到別的資料夾。")
+            print("      [prep_batch]    最保險的解法:把這個工具搬到**純英數路徑**"
+                  "（例如 D:\\sssh-tool）再跑。")
+            return
+        pdh._send_ctrl_combo(_VK_V)
+        time.sleep(0.25)
+
+    pdh._send_text_vk = patched
+    try:
+        yield
+    finally:
+        pdh._send_text_vk = real
 
 
 @contextlib.contextmanager
@@ -489,7 +565,8 @@ def download_stage(attach=False):
         return driver, False
     print("[prep_batch] OK:已停在主畫面，開始下載。")
 
-    with download_only():
+    # 中文安裝路徑那道也一起裝上 —— 見上面那段（同事 2026-08-14 踩到）。
+    with download_only(), unicode_safe_dialog_path():
         ok = process_document_prep(driver)
     return driver, bool(ok)
 

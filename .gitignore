@@ -26,6 +26,9 @@ final_state.png
 env.env
 id.txt
 
+# install.py 記下「這台機器要用哪一支 Python」（每台不一樣，不該進版控）
+python-path.txt
+
 # 審核表與任何試算表（含公文主旨／摘要／承辦人親筆擬辦，嚴禁推上 GitHub）
 # 這個 repo 是 public fork，一旦 commit 過就算之後刪掉也還留在 git 歷史裡，
 # 等於永久公開。預設全擋，之後真要納管某個 xlsx 再用 ! 開例外。
