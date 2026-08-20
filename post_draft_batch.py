@@ -392,11 +392,19 @@ def focus_list(driver, doc_no=None, label="承辦中"):
     time.sleep(2.0)
     if not _switch_to_frame_with_xpath(driver, _LIST_XPATH, "公文文號表頭", timeout=10):
         return False
-    if not _list_has(driver, doc_no):
-        print(f"      x  「{label}」清單裡找不到 {doc_no} —— 這份可能已經送走，"
-              f"或已經不在{label}（例如陳核完回來等存查）")
-        return False
-    return True
+    if _list_has(driver, doc_no):
+        return True
+
+    # 第 1 頁沒有 ≠ 不在清單裡。edoc 一頁只放 10 筆，公文一多就分頁 ——
+    # 2026-08-20 同事回報:承辦中超過 10 筆時，第 2 頁的公文一律被判成
+    # 「這份可能已經送走」而跳過。往後翻頁找過再說。
+    import list_pager
+    if list_pager.find_doc_across_pages(driver, doc_no):
+        return True
+
+    print(f"      x  「{label}」清單（含後面幾頁）裡都找不到 {doc_no} —— "
+          f"這份可能已經送走，或已經不在{label}（例如陳核完回來等存查）")
+    return False
 
 
 # 閱覽器渲染好了沒:ExtJS 跑起來才會有 textarea，被當成純文字丟出來時一個都沒有。

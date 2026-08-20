@@ -71,3 +71,78 @@ def test_circulate_doc_delegates_to_pending_doc_with_label(monkeypatch):
                         lambda drv, label="承辦中": got.update(label=label) or True)
     assert document_system.circulate_doc(object()) is True
     assert got["label"] == "受會案件"
+
+
+# ── 備料:清單分頁（2026-08-20 同事回報）───────────────────────────────────
+#
+# 公文超過 10 筆時 edoc 會分頁，而備料不陳會、公文會一直留在承辦中，
+# 所以筆數只會越積越多。原本只讀第 1 頁 → 第 11 筆之後從沒被下載，
+# 畫面卻印「共處理 10/10 筆」，跟全部收完長得一模一樣。
+
+class _PrepDriver:
+    """假 driver:只需要 window/frame 這幾個動作，公文號由 list_pager 那邊餵。"""
+
+    switch_to = _SwitchTo()
+    current_url = "https://edoc.gov.taipei/"
+    title = "t"
+    current_window_handle = "main"
+    window_handles = ["main"]
+
+    def __init__(self):
+        _PrepDriver.switch_to = self
+
+    def default_content(self):
+        pass
+
+    def window(self, handle):
+        pass
+
+
+def _patch_prep(monkeypatch, pages, warns=(), expect=-1):
+    """把 pending_doc_prep 的外部依賴全換掉，回傳「實際點開了哪幾筆」。"""
+    import list_pager
+    import pending_doc_handler
+
+    opened = []
+    monkeypatch.setattr(document_system, "_switch_to_frame_with_xpath",
+                        lambda *a, **k: True)
+    monkeypatch.setattr(document_system, "_prep_sidebar_count",
+                        lambda drv, label: expect)
+    monkeypatch.setattr(document_system, "_prep_already_done", lambda no: False)
+    monkeypatch.setattr(document_system, "_click_doc_by_no",
+                        lambda drv, no: opened.append(no) or True)
+    monkeypatch.setattr(document_system.time, "sleep", lambda s: None)
+    monkeypatch.setattr(list_pager, "walk_pages",
+                        lambda drv, expect=-1, **k: ([list(p) for p in pages],
+                                                     list(warns)))
+    monkeypatch.setattr(list_pager, "ensure_page_has",
+                        lambda drv, no, **k: True)
+    monkeypatch.setattr(pending_doc_handler, "handle_opened_document",
+                        lambda drv, do_fill_draft=True: True)
+    return opened
+
+
+def test_prep_processes_docs_on_second_page(monkeypatch):
+    """第 2 頁的公文也要被點開下載 —— 這次的病灶。"""
+    opened = _patch_prep(monkeypatch,
+                         [["MWAA0001", "MWAA0002"], ["MWAA0003"]], expect=3)
+    assert document_system.pending_doc_prep(_PrepDriver()) is True
+    assert opened == ["MWAA0001", "MWAA0002", "MWAA0003"]
+
+
+def test_prep_skips_doc_it_cannot_find_on_any_page(monkeypatch):
+    """翻遍清單都找不到某一筆 → 跳過它，但**不影響**其他筆繼續做。"""
+    import list_pager
+    opened = _patch_prep(monkeypatch, [["MWAA0001", "MWAA0002"]], expect=2)
+    monkeypatch.setattr(list_pager, "ensure_page_has",
+                        lambda drv, no, **k: no != "MWAA0001")
+    assert document_system.pending_doc_prep(_PrepDriver()) is True
+    assert opened == ["MWAA0002"]
+
+
+def test_prep_warns_when_fewer_than_sidebar_says(monkeypatch, capsys):
+    """左側寫 13 筆、只處理了 10 筆 → 要明講少了 3 筆，不可以安靜收工。"""
+    _patch_prep(monkeypatch, [[f"MWAA00{i:02d}" for i in range(10)]], expect=13)
+    document_system.pending_doc_prep(_PrepDriver())
+    out = capsys.readouterr().out
+    assert "少了 3 筆" in out

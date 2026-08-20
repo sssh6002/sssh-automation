@@ -252,6 +252,23 @@ def test_focus_list_fails_when_doc_not_in_any_list(monkeypatch):
     assert pdb.focus_list(_ListDriver("只有別人 MWAA9999"), "MWAA0001") is False
 
 
+def test_focus_list_pages_forward_to_find_doc(monkeypatch):
+    """第 1 頁沒有 ≠ 這份已經送走 —— 超過 10 筆會分頁，要往後翻（2026-08-20）。"""
+    import document_system as ds
+    import edoc_sidebar as sb
+    import list_pager as lp
+
+    monkeypatch.setattr(ds, "_switch_to_frame_with_xpath", lambda *a, **k: True)
+    monkeypatch.setattr(sb, "click_sidebar", lambda d, lab: True)
+    monkeypatch.setattr(pdb.time, "sleep", lambda s: None)
+    monkeypatch.setattr(lp, "find_doc_across_pages",
+                        lambda d, no, **k: no == "MWAA0001")
+
+    d = _ListDriver("第一頁只有 MWAA9999")
+    assert pdb.focus_list(d, "MWAA0001") is True      # 在第 2 頁，翻到了
+    assert pdb.focus_list(d, "MWAA0002") is False     # 每一頁都沒有，才算沒有
+
+
 class _MultiTabDriver:
     """多分頁的假 driver。tabs = {handle: (url, 有沒有 sidebar)}。"""
 

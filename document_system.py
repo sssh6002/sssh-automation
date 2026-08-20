@@ -1230,6 +1230,10 @@ def _collect_pending_doc_nos(driver):
 
     需先切到含「公文文號」表頭的 frame。用與 _click_first_document_in_pending 相同的
     column-index 策略,但回收整欄而非第一筆。找不到 → 回 []。
+
+    ⚠️ **只讀得到目前這一頁**（edoc 一頁 10 筆）。公文超過 10 筆時第 2 頁以後
+    讀不到 —— 2026-08-20 同事就是這樣漏收的。`pending_doc_prep` 已改走
+    `list_pager.walk_pages`（會翻頁），這支保留給診斷用。
     """
     js = r"""
         var pat = /^[A-Z][A-Z0-9]*\d{4,}$/;
@@ -1309,8 +1313,31 @@ def _prep_already_done(doc_no):
     return os.path.isdir(d) and bool(glob.glob(os.path.join(d, "*總結*.md")))
 
 
+def _prep_sidebar_count(driver, label):
+    """讀左側「<label>(N)」的 N,原版讀不到(選單收合)就退回 JS 版。讀不到回 -1。
+
+    備料要拿它跟「清單上翻頁翻出來的總筆數」對帳 —— 對不上就是漏收。
+    """
+    try:
+        n = _get_sidebar_paren_count(driver, label, timeout=5)
+    except Exception:
+        n = -1
+    if n >= 0:
+        return n
+    try:
+        from edoc_sidebar import sidebar_count
+        return sidebar_count(driver, label)
+    except Exception:
+        return -1
+
+
 def pending_doc_prep(driver, label="承辦中"):
-    """備料版<label>處理:對清單內每一筆公文下載+LLM 總結,不擬辦、不陳會。回 True/False。"""
+    """備料版<label>處理:對清單內每一筆公文下載+LLM 總結,不擬辦、不陳會。回 True/False。
+
+    2026-08-20:清單超過一頁時**要把每一頁都收進來**（見 `list_pager`）。
+    備料不陳會,公文會一直留在承辦中清單,累積過 10 筆就開始分頁 —— 原本只讀
+    第 1 頁,第 11 筆之後從來沒被下載過,而畫面印的是「共處理 10/10 筆」。
+    """
     print(f"[prep] {label}備料流程開始(下載+總結,不擬辦)")
     try:
         main_handle = driver.current_window_handle
@@ -1318,6 +1345,7 @@ def pending_doc_prep(driver, label="承辦中"):
         print(f"[prep] 讀 main_handle 失敗:{type(e).__name__}: {e}")
         return False
 
+    import list_pager
     from pending_doc_handler import handle_opened_document
     try:
         from document_closure.document_closure import _close_doc_viewer_window
@@ -1325,16 +1353,44 @@ def pending_doc_prep(driver, label="承辦中"):
         _close_doc_viewer_window = None
 
     xpath = "//th[contains(normalize-space(), '公文文號')]"
+
+    def refocus():
+        """把清單重新叫回**第 1 頁**:回主 window → 點左側選單 → 切回清單 frame。"""
+        try:
+            driver.switch_to.window(main_handle)
+            driver.switch_to.default_content()
+        except Exception as e:
+            print(f"[prep]   回主 window 失敗:{type(e).__name__}: {e}")
+            return False
+        from edoc_sidebar import click_sidebar
+        if not click_sidebar(driver, label):
+            return False
+        time.sleep(2.0)
+        return _switch_to_frame_with_xpath(driver, xpath, "公文文號表頭", timeout=10)
+
+    # sidebar 在主文件,要在切進 frame 之前讀。
+    driver.switch_to.default_content()
+    expect = _prep_sidebar_count(driver, label)
+
     driver.switch_to.default_content()
     if not _switch_to_frame_with_xpath(driver, xpath, "公文文號表頭"):
         _print_stop_banner(f"切不到{label}清單 frame",
                            "請手動檢視主 window 內容,然後再跑 python main.py 4")
         return False
-    doc_nos = _collect_pending_doc_nos(driver)
+
+    pages, warns = list_pager.walk_pages(driver, expect=expect)
+    for w in warns:
+        print(f"[prep] ⚠️ {w}")
+    doc_nos = [no for page in pages for no in page]
     if not doc_nos:
         print(f"[prep] {label}清單沒讀到任何公文號,結束。")
         return True
-    print(f"[prep] {label}清單共 {len(doc_nos)} 筆:{doc_nos}")
+    if len(pages) > 1:
+        print(f"[prep] {label}清單共 {len(pages)} 頁、{len(doc_nos)} 筆:{doc_nos}")
+        # walk_pages 停在最後一頁,先回第 1 頁再開始做(每一筆動手前還會再確認一次)。
+        refocus()
+    else:
+        print(f"[prep] {label}清單共 {len(doc_nos)} 筆:{doc_nos}")
 
     done = 0
     for i, doc_no in enumerate(doc_nos, 1):
@@ -1347,6 +1403,11 @@ def pending_doc_prep(driver, label="承辦中"):
         driver.switch_to.default_content()
         if not _switch_to_frame_with_xpath(driver, xpath, "公文文號表頭"):
             print(f"[prep]   切不到清單 frame,跳過 {doc_no}")
+            continue
+        # 點開公文、關掉閱覽器之後,清單常被系統打回第 1 頁 —— 第 2 頁以後的公文
+        # 每一筆動手之前都要先確認它現在在不在畫面上,不在就翻頁去找。
+        if not list_pager.ensure_page_has(driver, doc_no, refocus=refocus):
+            print(f"[prep]   翻遍清單都找不到 {doc_no},跳過(這一筆沒有下載)。")
             continue
         if not _click_doc_by_no(driver, doc_no):
             continue
@@ -1368,6 +1429,12 @@ def pending_doc_prep(driver, label="承辦中"):
         time.sleep(1)
 
     print(f"[prep] {label}備料完成,共處理 {done}/{len(doc_nos)} 筆。")
+    # 「處理 10/10」在漏收的時候長得跟全部收完一模一樣(2026-08-20 那次就是),
+    # 所以再跟左側的數字對一次帳,少了就明講少幾筆。
+    if expect >= 0 and done < expect:
+        print(f"[prep] ⚠️ 左側寫「{label}({expect})」,這次只處理 {done} 筆 —— "
+              f"少了 {expect - done} 筆。請到 edoc 看一下那幾筆是什麼狀況,"
+              f"需要的話再跑一次。")
     return True
 
 
