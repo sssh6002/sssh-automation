@@ -131,6 +131,10 @@
   .cut{display:flex;align-items:center;gap:10px;margin:10px 0;color:var(--bad);
        font-size:13px;font-weight:700}
   .cut::before,.cut::after{content:"";flex:1;border-top:2px dashed #eec9c9}
+  /* 上一批歸檔的結果。文號用等寬字 —— 那是承辦人回頭去 edoc 對的那把鑰匙。 */
+  .rhd{font-weight:700;margin:8px 0 3px}
+  .rli{font-size:13px;line-height:1.75;padding-left:2px}
+  .rli b{font-family:Consolas,"Microsoft JhengHei",monospace;margin-right:8px}
   /* ── 公告頁 ───────────────────────────────────────────────────────────
      全站唯一**不會送出任何東西**的動作頁。所以這裡不用紅底警語 —— 紅底要留給
      真的收不回來的動作，到處都是紅的等於沒有紅的。改用綠底講清楚「這一頁不會
@@ -212,6 +216,27 @@
   details.fold[open] > summary::before{content:"▾ "}
   details.fold > summary span.sub{font-weight:400;color:var(--sub);font-size:12px}
   details.fold[open] > summary{margin-bottom:6px}
+  /* 找舊文頁 */
+  .findbar{display:flex;gap:10px;align-items:center;margin-bottom:10px}
+  .findbar input{flex:1;font-size:17px;padding:10px 12px;border:1px solid var(--line);
+    border-radius:8px;font-family:inherit}
+  .findbar input:focus{outline:2px solid var(--th);outline-offset:-1px}
+  .chips{display:flex;flex-wrap:wrap;gap:5px;max-height:78px;overflow:auto;
+    margin:0 0 10px}
+  .chip{font-size:12px;padding:2px 9px;border-radius:20px;background:#eef1f0;
+    color:#555;cursor:pointer;border:1px solid transparent}
+  .chip:hover{background:#e3ebe7}
+  .chip.on{background:var(--th);color:#fff}
+  .chip .c{opacity:.65;margin-left:4px}
+  .fd{display:flex;align-items:flex-start;gap:10px;padding:8px 10px;
+    border-bottom:1px solid #eef1f0}
+  .fd:hover{background:#f6faf8}
+  .fd .l{flex:1;min-width:0}
+  .fd .t{font-size:14px;word-break:break-all}
+  .fd .m{font-size:12px;color:var(--sub);margin-top:2px;word-break:break-all}
+  .fd button{white-space:nowrap}
+  .fd mark{background:#fdf3c9;color:inherit;padding:0 1px;border-radius:2px}
+  .pill.tag{background:#e8eef5;color:#3d5a80}
 </style>
 
 <div class="tabs">
@@ -219,6 +244,7 @@
   <div class="click" id="tabarch">存查</div>
   <div class="click" id="tabanc">公告</div>
   <div class="click" id="tabweb">張貼</div><div class="click" id="tabold">舊文</div>
+  <div class="click" id="tabfind">找舊文</div>
   <div class="click" id="tabset">設定</div>
 </div>
 
@@ -390,15 +416,15 @@ function drawList() {
 }
 
 const TITLE = { live: "摘要", old: "舊文", send: "陳核", arch: "存查",
-                anc: "公告", web: "張貼", set: "設定" };
+                anc: "公告", web: "張貼", find: "找舊文", set: "設定" };
 // 整批處理的分頁（陳核／存查／公告／張貼）與設定頁看的都不是單筆,所以收掉左邊
 // 清單、右邊佔滿。
 const BATCH = (t) => t === "send" || t === "arch" || t === "anc" || t === "web"
-                  || t === "set";
+                  || t === "find" || t === "set";
 
 function setTab(t) {
   TAB = t;
-  ["live", "old", "send", "arch", "anc", "web", "set"].forEach(k =>
+  ["live", "old", "send", "arch", "anc", "web", "find", "set"].forEach(k =>
     el("tab" + k).className = t === k ? "on" : "click");
   el("title").textContent = TITLE[t];
   // 換頁等於換清單,原本選的那筆多半不在新清單裡,右邊一併清掉免得對不上。
@@ -414,6 +440,7 @@ function setTab(t) {
   if (t === "arch") return loadArch();
   if (t === "anc") return loadAnc();
   if (t === "web") return loadWeb();
+  if (t === "find") return loadFind();
   if (t === "set") return loadSet();
   el("detail").innerHTML = '<div class="empty">左邊點一筆公文。</div>';
   drawList();
@@ -425,6 +452,7 @@ el("tabsend").onclick = () => setTab("send");
 el("tabarch").onclick = () => setTab("arch");
 el("tabanc").onclick = () => setTab("anc");
 el("tabweb").onclick = () => setTab("web");
+el("tabfind").onclick = () => setTab("find");
 el("tabset").onclick = () => setTab("set");
 
 const KB = (n) => n >= 1048576 ? (n / 1048576).toFixed(1) + " MB"
@@ -839,9 +867,40 @@ function archItem(it, i, kind) {
       <span class="su">${esc(it.主旨) || "（讀不到主旨）"}</span></div>${body}${fix}</div>`;
 }
 
+// 上一批歸檔的結果。**做完了一定要留下痕跡**:歸檔一按下去待結案清單就作廢，
+// 跑完這一頁會退回「還沒讀過清單」—— 跟從來沒跑過長得一模一樣;而進度面板那句
+// 「歸檔結束」3 秒後自己收起來，收掉就什麼都不剩。承辦人 2026-08-31 回報
+// 「存查完沒有訊息告知已經存查完畢」就是這件事。歸檔沒有 admin 介入救不回來，
+// 做完了更要一眼看得到做了哪幾筆。這個框留到下次按「讀待結案清單」為止。
+//
+// 「哪幾筆真的歸檔了」是後端拿磁碟上的存查標記檔算的，不是解析畫面上的訊息 ——
+// 兩套標準遲早分岔，而最壞的方向是「畫面說歸檔了、其實沒有」。
+function archDone(r) {
+  if (!r) return "";
+  const li = xs => xs.map(it =>
+    `<div class="rli"><b>${esc(it.文號)}</b>${esc(it.主旨 || "")}</div>`).join("");
+  const ok = r.完成 || [], miss = r.沒做到 || [];
+  if (miss.length || !ok.length) {
+    // 沒完成那幾筆在 edoc 上到底是什麼狀態，這裡**不猜** —— 只講「磁碟上沒有
+    // 存查完成的痕跡」，再把人導回重讀清單，那才是真的答案。
+    return `<div class="note"><b>上一批歸檔沒有全部做完</b>（${esc(r.時間)}）——
+        送出 ${ok.length + miss.length} 筆，完成 ${ok.length} 筆。
+      ${ok.length ? `<div class="rhd">✓ 已存查</div>${li(ok)}` : ""}
+      <div class="rhd">✖ 沒有存查完成的痕跡</div>${li(miss)}
+      <div class="mut" style="margin-top:7px">歸檔遇到過不了的那一筆就整批停在
+        那裡（原因看剛才的訊息面板）。按下面的「讀待結案清單」重讀一次，
+        就知道 edoc 上現在還剩哪幾筆。</div></div>`;
+  }
+  return `<div class="safe"><b>✓ 上一批歸檔完成</b>（${esc(r.時間)}）——
+      這 ${ok.length} 筆已經在 edoc 上結案存查：${li(ok)}
+    <div class="mut" style="margin-top:7px">這一段<b>沒有貼校網</b> —— 要公告的
+      到「張貼」那一頁逐筆確認。底下的清單要按「讀待結案清單」才會更新。</div></div>`;
+}
+
 function drawArch() {
   const cr = ARCH.chrome || { ok: true };
-  const head = `<div class="danger">這一頁<b>會真的歸檔</b>：填檔號 → 按「確定存檔」→
+  // 結果框擺在最上面 —— 剛跑完的人第一眼要看到的是「做了哪幾筆」。
+  const head = archDone(ARCH.上批) + `<div class="danger">這一頁<b>會真的歸檔</b>：填檔號 → 按「確定存檔」→
       憑證簽章，<b>歸檔之後沒有 admin 介入就救不回來</b>。
       這一段<b>不會貼校網</b> —— 要公告的走「張貼」那一頁。</div>
     ${cr.ok ? "" : `<div class="note"><b>⛔ 現在做不了：</b>${esc(cr.說明)}</div>`}`;
@@ -1325,6 +1384,307 @@ el("webyes").onclick = async () => {
 //
 // `pin` 打錯會在下次收文時鎖卡（要跑戶政事務所），所以那一欄要再確認一次。
 let SET = null;
+
+// ── 找舊文 ────────────────────────────────────────────────────────────────
+//
+// 這一頁**只讀不寫**：後端 find_doc.py 不搬檔、不改名、不刪除，
+// 唯一會動到系統的是「開資料夾」（叫檔案總管）。所以這裡沒有二段確認 ——
+// 沒有收不回來的動作。
+//
+// 整個櫃子（一千多筆）一次抓回來，之後打字都在瀏覽器裡篩，所以不會卡。
+// 比對規則要跟 find_doc.search 一致：關鍵字用空白分開、**每個都要出現**、
+// 大小寫不分、空白不計（櫃子裡的標題常有空格，承辦人打字時不會照著空）。
+let FIND = null, FQ = "", FTAG = "", FMAX = 300, FALLTAGS = false;
+// 歸檔（複製進檔案櫃）用的狀態。FSHOW=面板開著嗎、FSEL=哪幾筆勾了、
+// FEDIT=承辦人改過的標籤／標題（改過的以他為準，重新讀計畫也不要蓋掉）。
+let FILE = null, FSHOW = false, FSEL = {}, FEDIT = {}, FASK = false;
+
+const fnorm = (s) => (s || "").replace(/\s+/g, "").toLowerCase();
+
+async function loadFind() {
+  say("讀取中…");
+  el("detail").innerHTML = '<div class="empty">正在翻櫃子…</div>';
+  try {
+    const j = await (await fetch("/api/find/plan")).json();
+    if (!j.ok) { el("detail").innerHTML = ""; return say(j.錯誤, "err"); }
+    FIND = j;
+    (FIND.rows || []).forEach(r => { r._h = fnorm(r.資料夾 + " " + (r.年份 || "")); });
+    FMAX = 300;
+    drawFind();
+    say("");   // 未歸檔那句改用畫面上的黃框講，比一行小字看得見
+    const box = el("fq");
+    if (box) { box.value = FQ; box.focus(); }
+  } catch (e) { say("連不上程式，是不是關掉了？", "err"); }
+}
+
+function findHits() {
+  const rows = FIND.rows || [];
+  const terms = FQ.split(/\s+/).map(fnorm).filter(Boolean);
+  return rows.filter(r =>
+    (!FTAG || r.標籤 === FTAG) && terms.every(t => r._h.includes(t)));
+}
+
+// 命中的字標黃。先在原字串上找位置、再逐段跳脫，才不會把 &amp; 這種跳脫序列切壞。
+function hl(text, terms) {
+  const t0 = String(text || "");
+  if (!terms.length || !t0) return esc(t0);
+  const low = t0.toLowerCase();
+  const marks = [];
+  terms.forEach(t => {
+    let i = 0;
+    while ((i = low.indexOf(t, i)) >= 0) { marks.push([i, i + t.length]); i += t.length; }
+  });
+  if (!marks.length) return esc(t0);
+  marks.sort((a, b) => a[0] - b[0]);
+  let out = "", pos = 0;
+  for (const [a, b] of marks) {
+    if (a < pos) continue;
+    out += esc(t0.slice(pos, a)) + "<mark>" + esc(t0.slice(a, b)) + "</mark>";
+    pos = b;
+  }
+  return out + esc(t0.slice(pos));
+}
+
+function drawFind() {
+  const hits = findHits();
+  const terms = FQ.split(/\s+/).map(t => t.trim().toLowerCase()).filter(Boolean);
+  const shown = hits.slice(0, FMAX);
+  el("count").textContent = `櫃子共 ${(FIND.rows || []).length} 筆，找到 ${hits.length} 筆`;
+  // 標籤有 70 幾個，其中一大半只出現過一次（打字當下隨手寫的）。
+  // 全部攤開會蓋掉半個畫面，所以預設只列「出現兩次以上」的，其餘收起來。
+  const alltags = FIND.標籤 || [];
+  const once = alltags.filter(t => t.筆數 < 2);
+  const showtags = FALLTAGS ? alltags : alltags.filter(t => t.筆數 >= 2);
+  const chips = showtags.map(t =>
+    `<span class="chip ${FTAG === t.標籤 ? "on" : ""}" data-tag="${esc(t.標籤)}"
+      >${esc(t.標籤)}<span class="c">${t.筆數}</span></span>`).join("")
+    + (once.length ? `<span class="chip" id="ftmore2">${FALLTAGS
+        ? "收起只出現一次的" : `還有 ${once.length} 個只出現一次的標籤`}</span>` : "");
+  const list = shown.map((r, i) => `
+    <div class="fd">
+      <div class="l">
+        <div class="t">${r.標籤 ? `<span class="pill tag">${esc(r.標籤)}</span> ` : ""}${
+          hl(r.標題 || r.資料夾, terms)}</div>
+        <div class="m">${esc(r.顯示日期) || "日期不明"}　·　${
+          hl(r.文號 || "（名字裡沒有文號）", terms)}${
+          r.年份 ? "　·　" + esc(r.年份) : ""}</div>
+      </div>
+      <button data-open="${i}">開資料夾</button>
+    </div>`).join("");
+  el("detail").innerHTML = `
+    <div class="safe">這一頁<b>只是找東西，不會動到櫃子裡的任何檔案</b> ——
+      能按的只有「開資料夾」。</div>
+    <div class="findbar">
+      <input id="fq" type="text" placeholder="打關鍵字，例如：機器人 競賽　／　1156006169　／　113年"
+        value="${esc(FQ)}" autocomplete="off">
+      <button id="fclear">清空</button>
+    </div>
+    <p class="mut" style="margin:0 0 8px">比對的是<b>資料夾名字</b>（日期／文號／【標籤】／標題），
+      不是 PDF 內文。多個關鍵字用空白隔開，<b>每個都要出現</b>才算命中；空格與大小寫不計。</p>
+    <div class="chips">${chips || '<span class="mut">這個櫃子裡還沒有【標籤】</span>'}</div>
+    ${(FIND.未歸檔 || []).length ? `<div class="note">⚠️ 工作區還有
+      ${FIND.未歸檔.length} 筆沒複製進櫃子，<b>那幾筆在這裡搜不到</b>。
+      <button id="fopen" style="margin-left:8px">${FSHOW ? "收起來" : "看看要怎麼歸"}</button>
+      </div>` : ""}
+    ${FSHOW ? filePanel() : ""}
+    <div class="box" style="padding:0">
+      ${list || `<div class="empty">${FQ || FTAG
+        ? "沒有符合的。關鍵字少打一個試試，或改用文號的後幾碼。"
+        : "上面打字就開始找。"}</div>`}
+    </div>
+    ${hits.length > shown.length ? `<p class="mut" style="margin:8px 0 0">
+      符合的有 ${hits.length} 筆，<b>這裡只列出前 ${shown.length} 筆</b>。
+      <button id="fmore">再列 300 筆</button></p>` : ""}
+    <p class="mut" style="margin:8px 0 0">櫃子：<code>${esc(FIND.櫃子)}</code>
+      　要換位置就在 <code>env.env</code> 加一行 <code>archive_root=路徑</code>。</p>`;
+
+  const box = el("fq");
+  box.oninput = () => { FQ = box.value; FMAX = 300; drawFind(); el("fq").focus();
+                        el("fq").setSelectionRange(FQ.length, FQ.length); };
+  el("fclear").onclick = () => { FQ = ""; FTAG = ""; FMAX = 300; drawFind(); el("fq").focus(); };
+  const more = el("fmore");
+  if (more) more.onclick = () => { FMAX += 300; drawFind(); };
+  const t2 = el("ftmore2");
+  if (t2) t2.onclick = () => { FALLTAGS = !FALLTAGS; drawFind(); };
+  const fo = el("fopen");
+  if (fo) fo.onclick = () => {
+    FSHOW = !FSHOW;
+    if (FSHOW && !FILE) return loadFile();
+    drawFind();
+  };
+  bindFile();
+  [...document.querySelectorAll("[data-tag]")].forEach(c =>
+    c.onclick = () => { FTAG = FTAG === c.dataset.tag ? "" : c.dataset.tag;
+                        FMAX = 300; drawFind(); });
+  [...document.querySelectorAll("[data-open]")].forEach(b =>
+    b.onclick = async () => {
+      const r = shown[+b.dataset.open];
+      b.textContent = "開啟中…";
+      try {
+        const j = await (await fetch("/api/open-folder", {
+          method: "POST", body: JSON.stringify({ 目錄: r.路徑 })
+        })).json();
+        b.textContent = j.ok ? "已開啟" : "開不起來";
+        if (!j.ok) say(j.錯誤, "err");
+      } catch (e) { b.textContent = "開不起來"; say("開不起來：" + e, "err"); }
+      setTimeout(() => { b.textContent = "開資料夾"; }, 2000);
+    });
+}
+
+// ── 歸檔:把工作區辦完的公文複製進檔案櫃 ─────────────────────────────────────
+//
+// ⚠️ 這裡的「歸檔」是**複製進承辦人自己的 D:\01-公文**，
+//    跟「存查」頁（在 edoc 上結案，無 admin 介入無法復原）是兩件不同的事。
+//    這一顆只在本機硬碟複製檔案:**不搬移、不改名、不刪除工作區的任何東西**，
+//    也不覆蓋櫃子裡既有的資料夾。所以風險等級遠低於陳核／存查／張貼那三頁 ——
+//    但它仍然會在你的櫃子裡長出資料夾，所以照樣走二段確認。
+
+async function loadFile() {
+  el("detail").innerHTML = '<div class="empty">正在算要怎麼歸…</div>';
+  try {
+    const j = await (await fetch("/api/file/plan")).json();
+    if (!j.ok) { FSHOW = false; drawFind(); return say(j.錯誤, "err"); }
+    FILE = j;
+    // 預設全勾「可以歸」的。名字是程式算的草稿，勾之前本來就要看一眼。
+    (FILE.項目 || []).forEach(it => {
+      if (it.狀態 === "go" && !(it.文號 in FSEL)) FSEL[it.文號] = true;
+    });
+    drawFind();
+  } catch (e) { FSHOW = false; drawFind(); say("連不上程式，是不是關掉了？", "err"); }
+}
+
+// 跟後端 file_doc.target_name 同一套規則：有標籤用【】，沒標籤用底線。
+function fileName(it) {
+  const e = FEDIT[it.文號] || {};
+  const tag = (e.標籤 !== undefined ? e.標籤 : it.標籤).trim();
+  const title = (e.標題 !== undefined ? e.標題 : it.標題).trim();
+  const head = it.日期 ? `${it.日期}_${it.文號}` : it.文號;
+  return tag ? `${head}【${tag}】${title}` : (title ? `${head}_${title}` : head);
+}
+
+function filePanel() {
+  if (!FILE) return '<div class="box"><div class="mut">讀取中…</div></div>';
+  const items = FILE.項目 || [];
+  const go = items.filter(i => i.狀態 === "go");
+  const other = items.filter(i => i.狀態 !== "go" && i.狀態 !== "已在櫃子");
+  const sel = go.filter(i => FSEL[i.文號]);
+  const rows = go.map(it => {
+    const e = FEDIT[it.文號] || {};
+    return `
+    <div class="fd" style="align-items:flex-start">
+      <input type="checkbox" data-sel="${esc(it.文號)}" ${FSEL[it.文號] ? "checked" : ""}
+        style="margin-top:6px">
+      <div class="l">
+        <div class="m" style="margin:0 0 4px">${esc(it.文號)}　·　${
+          it.日期 || "日期讀不到"}　·　${it.檔案數} 個檔</div>
+        <div style="display:flex;gap:6px;flex-wrap:wrap">
+          <input type="text" data-tag2="${esc(it.文號)}" placeholder="標籤（可空白）"
+            value="${esc(e.標籤 !== undefined ? e.標籤 : it.標籤)}"
+            style="width:110px;padding:5px 7px;border:1px solid var(--line);border-radius:6px">
+          <input type="text" data-title="${esc(it.文號)}" placeholder="精簡標題"
+            value="${esc(e.標題 !== undefined ? e.標題 : it.標題)}"
+            style="flex:1;min-width:260px;padding:5px 7px;border:1px solid var(--line);border-radius:6px">
+        </div>
+        <div class="m" style="margin-top:4px">會變成：<b id="nm-${esc(it.文號)}"
+          >${esc(fileName(it))}</b></div>
+        ${(it.提醒 || []).map(n => `<div class="m" style="color:var(--warn)">⚠️ ${
+          esc(n)}</div>`).join("")}
+        <details class="fold" style="margin-top:4px">
+          <summary><span class="sub">看主旨原文</span></summary>
+          <div class="mut">${esc(it.主旨 || "（讀不到主旨）")}</div>
+        </details>
+      </div>
+    </div>`;
+  }).join("");
+
+  return `<div class="box">
+    <p class="fld">歸檔到檔案櫃 <span>${go.length} 筆可以歸 · 已勾 ${sel.length} 筆</span></p>
+    <div class="safe" style="margin:0 0 10px">這一顆是<b>複製</b>，不是搬家 ——
+      工作區那幾份原封不動留著（那些資料夾名是程式拿來找檔案的鍵，動了會壞）。
+      櫃子裡已經有同名資料夾的話會擋下來，<b>不覆蓋</b>。<br>
+      ⚠️ 跟「存查」頁不一樣：那一頁是在 edoc 上結案，這一頁只動你自己的硬碟。</div>
+    ${FILE.讀到規格檔 ? "" : `<div class="note">⚠️ 找不到
+      <code>file_doc.md</code>，標籤與標題都不會自動處理。</div>`}
+    <p class="mut" style="margin:0 0 8px">名字是程式照
+      <code>file_doc.md</code> 算的<b>草稿</b>，兩格都可以直接改；
+      標籤空白就會用底線接標題（櫃子裡早期就是那種寫法）。</p>
+    ${rows || '<div class="mut">目前沒有可以歸的。</div>'}
+    ${other.length ? `<details class="fold" style="margin-top:10px">
+      <summary>還不能歸的 ${other.length} 筆<span class="sub">　點開看原因</span></summary>
+      ${other.map(i => `<div class="m">${esc(i.文號)}　—　${esc(i.狀態)}${
+        i.狀態 === "還沒辦完"
+          ? "（存查／張貼還沒走完，或你還沒在摘要頁標「已辦」）" : ""}</div>`).join("")}
+    </details>` : ""}
+    <div class="sendbar" style="margin-top:12px">
+      ${FASK
+        ? `<button id="fyes" class="big solid risk">確定，複製 ${sel.length} 筆進櫃子</button>
+           <button id="fno">再想想</button>
+           <span class="msg">會在 ${esc(FILE.櫃子)} 底下長出 ${sel.length} 個資料夾。
+             工作區完全不動。</span>`
+        : `<button id="fgo" class="big solid" ${sel.length ? "" : "disabled"}
+             >複製進櫃子（${sel.length} 筆）</button>
+           <span id="fmsg" class="mut">複製完這幾筆就搜得到了。</span>`}
+    </div>
+  </div>`;
+}
+
+function bindFile() {
+  [...document.querySelectorAll("[data-sel]")].forEach(c =>
+    c.onchange = () => { FSEL[c.dataset.sel] = c.checked; FASK = false; drawFind(); });
+  // 打字時只更新「會變成」那一行，不整頁重畫 —— 重畫會把游標踢掉。
+  const upd = (no) => {
+    const it = (FILE.項目 || []).find(x => x.文號 === no);
+    const n = el("nm-" + no);
+    if (it && n) n.textContent = fileName(it);
+  };
+  [...document.querySelectorAll("[data-tag2]")].forEach(i =>
+    i.oninput = () => {
+      const no = i.dataset.tag2;
+      FEDIT[no] = { ...(FEDIT[no] || {}), 標籤: i.value };
+      upd(no);
+    });
+  [...document.querySelectorAll("[data-title]")].forEach(i =>
+    i.oninput = () => {
+      const no = i.dataset.title;
+      FEDIT[no] = { ...(FEDIT[no] || {}), 標題: i.value };
+      upd(no);
+    });
+  const g = el("fgo");
+  if (g) g.onclick = () => { FASK = true; drawFind(); };
+  const no2 = el("fno");
+  if (no2) no2.onclick = () => { FASK = false; drawFind(); };
+  const yes = el("fyes");
+  if (yes) yes.onclick = doFile;
+}
+
+async function doFile() {
+  const go = (FILE.項目 || []).filter(i => i.狀態 === "go" && FSEL[i.文號]);
+  const payload = go.map(it => {
+    const e = FEDIT[it.文號] || {};
+    return { 文號: it.文號,
+             標籤: e.標籤 !== undefined ? e.標籤 : it.標籤,
+             標題: e.標題 !== undefined ? e.標題 : it.標題 };
+  });
+  el("fyes").disabled = true;
+  say("複製中…");
+  try {
+    const j = await (await fetch("/api/file/go", {
+      method: "POST", body: JSON.stringify({ 項目: payload })
+    })).json();
+    if (!j.ok) return say(j.錯誤, "err");
+    const good = (j.結果 || []).filter(r => r.ok);
+    const bad = (j.結果 || []).filter(r => !r.ok);
+    // 失敗與被擋下的都要講 —— 只報成功數字是這個 fork 最常見的坑型。
+    say(`複製好 ${good.length} 筆` + (bad.length ? `，${bad.length} 筆沒成功` : "")
+        + ((j.擋下 || []).length ? `，${j.擋下.length} 筆按下去之前狀態變了` : ""),
+        bad.length || (j.擋下 || []).length ? "err" : "ok");
+    if (bad.length) console.log("沒成功的：", bad);
+    good.forEach(r => { delete FSEL[r.文號]; delete FEDIT[r.文號]; });
+    FASK = false; FILE = null;
+    await loadFind();          // 櫃子變了，清單與「還有幾筆沒歸」都要重讀
+    if (FSHOW) await loadFile();
+  } catch (e) { say("複製失敗：" + e, "err"); }
+}
 
 async function loadSet() {
   say("讀取中…");

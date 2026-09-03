@@ -43,6 +43,10 @@ def clean(monkeypatch):
     monkeypatch.setattr(ui, "chrome_state", lambda: {"ok": True, "說明": None})
     monkeypatch.setattr(ui.SCAN, "lines", [])
     monkeypatch.setattr(ui.ARCH, "argv", ["archive_batch.py", "--go"])
+    # 上一批歸檔的結果是模組層的狀態,不清會漏到下一個測試去。
+    ui.remember_arch_batch(None)
+    monkeypatch.setattr(ui.ARCH, "proc", None)      # proc=None → 沒在跑
+    monkeypatch.setattr(ui.ARCH, "exit", None)      # exit=None → 還沒跑完
     calls = []
     monkeypatch.setattr(ui.ARCH, "start",
                         lambda: (calls.append(list(ui.ARCH.argv)), (True, None))[1])
@@ -334,3 +338,99 @@ def test_clear_marker_deletes_and_invalidates_the_cached_list(
     assert r["ok"] is True
     assert not mark.exists()
     assert ui.SCAN.lines == []
+
+
+# ── 跑完之後看得出來做了哪幾筆（2026-08-31 承辦人回報）─────────────────────
+#
+# 歸檔一按下去待結案清單就作廢，所以跑完這一頁會退回「還沒讀過清單」——
+# 跟從來沒跑過長得一模一樣;而進度面板那句「歸檔結束」3 秒後自己收起來。
+# 於是承辦人做完一批，畫面上一點痕跡都沒有:「存查完沒有訊息告知已經存查完畢」。
+#
+# 這是**無 admin 介入救不回來**的動作，「做完了沒、做了哪幾筆」不能只靠一個會
+# 自己消失的面板。下面釘的是這個結果框的三件事:
+#   1. 沒跑完不報結果（跑到一半的畫面不能長得像做完了）
+#   2. 「真的歸檔了」看磁碟上的存查標記檔，不看程式印了什麼
+#   3. 這一批輪不到的公文不算在裡面（算進去會讓人以為出了事）
+
+def _finished(monkeypatch, code=0):
+    """假裝歸檔那支跑完了。proc=None → Job.running 是 False。"""
+    monkeypatch.setattr(ui.ARCH, "proc", None)
+    monkeypatch.setattr(ui.ARCH, "exit", code)
+
+
+def _marks(monkeypatch, **has):
+    """假裝磁碟上這幾筆有／沒有存查標記檔。"""
+    monkeypatch.setattr(ab, "evaluate",
+                        lambda no: {"文號": no, "已存查標記": bool(has.get(no))})
+
+
+def _start(srv, monkeypatch, *items):
+    monkeypatch.setattr(ui, "scan_plan", lambda: _plan(*items))
+    r = _post(srv, "/api/archive/start",
+              {"確認": True, "文號": [it["文號"] for it in items]})
+    assert r["ok"] is True
+    return r
+
+
+def test_no_result_before_anything_ran():
+    assert ui.archive_payload()["上批"] is None
+
+
+def test_no_result_while_still_running(srv, clean, monkeypatch):
+    """送出去了但還沒跑完 —— 不能先報結果，那時候一筆都還沒歸檔。"""
+    _start(srv, monkeypatch, _go("MWAA0001"))
+    assert ui.archive_payload()["上批"] is None
+
+
+def test_result_reads_the_disk_marker_not_the_log(srv, clean, monkeypatch):
+    """「真的歸檔了」認的是存查標記檔 —— 跟舊文頁、plan() 的 danger 同一個痕跡。"""
+    _start(srv, monkeypatch, _go("MWAA0001"), _go("MWAA0002"))
+    _finished(monkeypatch)
+    _marks(monkeypatch, MWAA0001=True, MWAA0002=True)
+    r = ui.archive_payload()["上批"]
+    assert [it["文號"] for it in r["完成"]] == ["MWAA0001", "MWAA0002"]
+    assert r["沒做到"] == [] and r["結束碼"] == 0
+    assert r["完成"][0]["主旨"] == "測試"       # 只有文號的清單看不出是哪份公文
+
+
+def test_result_lists_the_ones_without_a_marker(srv, clean, monkeypatch):
+    """整批停在中間是常態（前面那筆過不了）—— 沒做到的要講出來，不能默默吞掉。"""
+    _start(srv, monkeypatch, _go("MWAA0001"), _go("MWAA0002"))
+    _finished(monkeypatch, code=1)
+    _marks(monkeypatch, MWAA0001=True)
+    r = ui.archive_payload()["上批"]
+    assert [it["文號"] for it in r["完成"]] == ["MWAA0001"]
+    assert [it["文號"] for it in r["沒做到"]] == ["MWAA0002"]
+
+
+def test_exit_zero_alone_does_not_mean_archived(srv, clean, monkeypatch):
+    """結束碼 0 不算數。畫面說歸檔了、其實沒有，是這裡最壞的分岔方向。"""
+    _start(srv, monkeypatch, _go("MWAA0001"))
+    _finished(monkeypatch, code=0)
+    _marks(monkeypatch)                          # 磁碟上什麼都沒有
+    r = ui.archive_payload()["上批"]
+    assert r["完成"] == []
+    assert [it["文號"] for it in r["沒做到"]] == ["MWAA0001"]
+
+
+def test_result_ignores_docs_this_batch_never_reached(srv, clean, monkeypatch):
+    """停止點後面的公文這一批根本輪不到，算成「沒做到」會讓人去查沒問題的公文。"""
+    stop = dict(_go("MWAA0002"), 狀態="stop", 分類="待確認", 檔號="",
+                擋下原因="沒有 8 位檔號")
+    _start(srv, monkeypatch, _go("MWAA0001"), stop)
+    _finished(monkeypatch)
+    _marks(monkeypatch, MWAA0001=True)
+    r = ui.archive_payload()["上批"]
+    assert [it["文號"] for it in r["完成"]] == ["MWAA0001"]
+    assert r["沒做到"] == []
+
+
+def test_rescan_clears_the_last_result(srv, clean, monkeypatch):
+    """重讀清單＝要看現在還剩哪幾筆，上一批的結果讓位（免得跟新清單對不上）。"""
+    _start(srv, monkeypatch, _go("MWAA0001"))
+    _finished(monkeypatch)
+    _marks(monkeypatch, MWAA0001=True)
+    assert ui.archive_payload()["上批"] is not None
+    monkeypatch.setattr(ui.SCAN, "start", lambda: (True, None))
+    assert _post(srv, "/api/scan/start", {})["ok"] is True
+    assert ui.archive_payload()["上批"] is None

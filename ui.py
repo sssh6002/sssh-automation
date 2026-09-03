@@ -24,6 +24,10 @@ ui.py
               不用讀卡機。文案可以直接改，改完自動存回審核表「公告」欄。
               唯一的破壞性動作是「重產」（會蓋掉你改過的字），所以那顆是逐筆、
               而且要再確認一次。判定交給 announce_doc.plan()。
+  **找舊文頁**
+              關鍵字找承辦人自己的檔案櫃（`D:\01-公文`，見 find_doc.py）。
+              **只讀不寫**:不搬檔、不改名、不刪除，唯一的動作是開檔案總管。
+              比對的是資料夾名（日期／文號／【標籤】／標題），不是 PDF 內文。
   **張貼頁**  ⚠️ 這一頁**會真的貼上校網**（呼叫 post_web_batch.py --go），
               而那是全站**唯一真的對外**的動作 —— 貼出去全校師生家長都看得到。
               形狀照陳核頁（三堆＋二段確認），判定交給 post_web_batch.plan()。
@@ -38,6 +42,7 @@ import subprocess
 import sys
 import threading
 import webbrowser
+from datetime import datetime
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import urlparse
 
@@ -48,6 +53,8 @@ if _BASE_DIR not in sys.path:
     sys.path.insert(0, _BASE_DIR)
 
 import review_sheet as rs  # noqa: E402
+import find_doc  # noqa: E402
+import file_doc  # noqa: E402
 
 PAGE = os.path.join(_BASE_DIR, "ui_page.html")
 HOST, PORT = "127.0.0.1", 8760
@@ -420,6 +427,59 @@ def scan_plan():
     return None
 
 
+# 上一批送出去歸檔的是哪幾筆。
+#
+# 為什麼要記:歸檔一按下去，待結案清單就作廢（`SCAN.lines = []`），所以跑完之後
+# 這一頁會退回「還沒讀過清單」—— 跟從來沒跑過長得一模一樣。進度面板那句「歸檔
+# 結束」3 秒後自己收起來，收掉就什麼痕跡都不剩。2026-08-31 承辦人回報「存查完
+# 沒有訊息告知已經存查完畢」講的就是這件事:**歸檔是不可復原的動作，做完了卻要
+# 自己去 edoc 對才知道有沒有成**。
+ARCH_SENT = None            # {"時間": "08/31 14:05", "預期": [{"文號","主旨"}…]}
+
+
+def remember_arch_batch(p):
+    """記下這一批送出去的是哪幾筆。p=None 代表把上一批的結果清掉。
+
+    只記 `會歸檔` 那幾筆 —— 停止點後面的公文這一批根本輪不到，把它們算成
+    「沒做到」會讓人以為出了事。
+    """
+    global ARCH_SENT
+    if p is None:
+        ARCH_SENT = None
+        return
+    subj = {it["文號"]: (it.get("主旨") or "") for it in (p.get("清單") or [])}
+    ARCH_SENT = {
+        "時間": datetime.now().strftime("%m/%d %H:%M"),
+        "預期": [{"文號": no, "主旨": subj.get(no, "")}
+                for no in (p.get("會歸檔") or [])],
+    }
+
+
+def archive_result():
+    """上一批歸檔的結果。沒跑過、或還在跑，回 None。
+
+    「哪幾筆真的歸檔了」**不解析程式印出來的字**，看磁碟上的存查標記檔 ——
+    那是驗證「文號已從待結案清單消失」之後才寫的那一份，也是全站其他地方
+    （舊文、`plan()` 的 danger 判定）認的同一個痕跡。自己另外解析輸出等於
+    第二套標準，而最壞的分岔方向是「畫面說歸檔了、其實沒有」。
+
+    送出前這幾筆一定**沒有**標記（有的話 plan() 會判成 danger，整批不給按），
+    所以現在有標記就是這一批寫上去的。
+    """
+    if ARCH_SENT is None or ARCH.running or ARCH.exit is None:
+        return None
+    import archive_batch as ab
+    done, miss = [], []
+    for it in ARCH_SENT["預期"]:
+        try:
+            marked = bool(ab.evaluate(it["文號"]).get("已存查標記"))
+        except Exception:
+            marked = False          # 讀不到就當沒做到 —— 往「請自己去看」的方向錯
+        (done if marked else miss).append(it)
+    return {"時間": ARCH_SENT["時間"], "結束碼": ARCH.exit,
+            "完成": done, "沒做到": miss}
+
+
 def archive_payload():
     """存查頁要的東西。回 dict。
 
@@ -432,6 +492,8 @@ def archive_payload():
         "掃過": p is not None,
         "掃描中": SCAN.running,
         "計畫": p,
+        # 上一批歸檔的結果留在這一頁上，直到下次重讀清單為止（見 ARCH_SENT）。
+        "上批": archive_result(),
     }
 
 
@@ -579,7 +641,39 @@ def web_payload():
 #
 # 規格檔（判斷都寫在那幾份裡）也放這一頁的入口 —— 現在得自己去翻檔案。
 
-SPEC_FILES = ["summarize_doc.md", "announce_doc.md", "routing_flags.yaml"]
+SPEC_FILES = ["summarize_doc.md", "announce_doc.md", "routing_flags.yaml",
+              "file_doc.md"]
+
+
+def find_payload():
+    """找舊文頁要的東西:整個檔案櫃的清單一次送過去，之後打字都在瀏覽器裡篩。
+
+    為什麼一次全送:1500 筆的名字大約 200KB，本機讀完不到一秒；換成每打一個字
+    就往後端問一次，反而卡。**這一頁只讀不寫** —— 沒有任何按鈕會動到櫃子裡的檔案，
+    唯一的動作是「在檔案總管開啟」。
+
+    順便算「工作區有、櫃子裡還沒有」的筆數:那幾筆在這裡**搜不到**，
+    畫面要講清楚，不然承辦人會以為公文不見了。
+    """
+    root = find_doc.archive_root()
+    rows = find_doc.scan(root)
+    miss = find_doc.not_archived(rows)
+    note = ""
+    if not os.path.isdir(root):
+        note = f"找不到檔案櫃:{root}。要改路徑就在 env.env 加一行 archive_root=..."
+    elif miss:
+        note = (f"工作區還有 {len(miss)} 筆沒複製進櫃子，那幾筆在這裡搜不到。")
+    return {"櫃子": root, "rows": rows, "標籤": find_doc.tags(rows),
+            "未歸檔": miss, "訊息": note}
+
+
+def file_payload():
+    """歸檔（複製進檔案櫃）要的計畫。**只計算，不動任何檔案。**
+
+    ⚠️ 這裡的「歸檔」是複製進承辦人自己的 `D:\01-公文`，
+    跟 edoc 的「結案存查」（存查頁）不是同一件事，畫面上要講清楚。
+    """
+    return file_doc.plan()
 
 
 def settings_payload():
@@ -823,6 +917,16 @@ class Handler(BaseHTTPRequestHandler):
                                    "錯誤": "還沒有任何公文。請先按「收新公文」。"})
             except Exception as e:
                 return self._json({"ok": False, "錯誤": f"{type(e).__name__}: {e}"})
+        if path == "/api/file/plan":
+            try:
+                return self._json({"ok": True, **file_payload()})
+            except Exception as e:
+                return self._json({"ok": False, "錯誤": f"{type(e).__name__}: {e}"})
+        if path == "/api/find/plan":
+            try:
+                return self._json({"ok": True, **find_payload()})
+            except Exception as e:
+                return self._json({"ok": False, "錯誤": f"{type(e).__name__}: {e}"})
         if path == "/api/settings/plan":
             try:
                 return self._json({"ok": True, **settings_payload()})
@@ -906,6 +1010,9 @@ class Handler(BaseHTTPRequestHandler):
             if not cs["ok"]:
                 return self._json({"ok": False, "錯誤": cs["說明"]})
             ok, err = SCAN.start()
+            if ok:
+                # 重讀清單＝要看的是「現在還剩哪幾筆」，上一批的結果讓位。
+                remember_arch_batch(None)
             return self._json({"ok": ok, "錯誤": err} if not ok else {"ok": True})
 
         if path == "/api/archive/start":
@@ -944,6 +1051,8 @@ class Handler(BaseHTTPRequestHandler):
             ok, err = ARCH.start()
             if not ok:
                 return self._json({"ok": False, "錯誤": err})
+            # 記下送出去的是哪幾筆,跑完才有東西可以回頭對（見 archive_result）。
+            remember_arch_batch(p)
             # 跑完清單一定不一樣了。舊的留著會讓人拿過期的清單再按一次送出，
             # 而下一道 --expect 雖然擋得住，但那時人已經按下去了。直接作廢。
             SCAN.lines = []
@@ -1188,6 +1297,34 @@ class Handler(BaseHTTPRequestHandler):
             except Exception as e:
                 return self._json({"ok": False, "錯誤": f"開不起來:{e}"})
             return self._json({"ok": True})
+
+        if path == "/api/file/go":
+            # 真的複製。**畫面只送文號與那兩格文字** —— 來源路徑、目標路徑一律
+            # 由後端自己重算,不接畫面給的路徑（不然這個位址就變成「用瀏覽器叫
+            # 本機把任意資料夾複製到任意地方」）。
+            want = body.get("項目") or []
+            overrides, nos = {}, []
+            for it in want:
+                no = str(it.get("文號") or "").strip().upper()
+                if not no:
+                    continue
+                nos.append(no)
+                overrides[no] = {"標籤": str(it.get("標籤") or "").strip(),
+                                 "標題": str(it.get("標題") or "").strip()}
+            if not nos:
+                return self._json({"ok": False, "錯誤": "一筆都沒勾"})
+            try:
+                p2 = file_doc.plan(only=nos, overrides=overrides)
+                go = [i for i in p2["項目"] if i["狀態"] == "go"]
+                # 勾了卻不能歸的（狀態在你按下去之前變了）要明講，不能安靜跳過。
+                blocked = [{"文號": i["文號"], "狀態": i["狀態"]}
+                           for i in p2["項目"] if i["狀態"] != "go"]
+                done = file_doc.run(go)
+            except Exception as e:
+                return self._json({"ok": False, "錯誤": f"{type(e).__name__}: {e}"})
+            ok_n = sum(1 for r in done if r.get("ok"))
+            print(f"[ui] 歸檔到檔案櫃:成功 {ok_n}／{len(done)} 筆")
+            return self._json({"ok": True, "結果": done, "擋下": blocked})
 
         if path == "/api/open-folder":
             d = str(body.get("目錄") or "")
