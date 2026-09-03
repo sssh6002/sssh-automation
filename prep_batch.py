@@ -571,6 +571,76 @@ def download_stage(attach=False):
     return driver, bool(ok)
 
 
+# ── 第一段跑完:逐筆對帳（看磁碟，不看畫面） ──────────────────────────────
+
+def _has_main_pdf(doc_dir):
+    """這個公文目錄裡到底有沒有來文主檔（數字_數字[A-Z].pdf）。
+
+    沿用 summarize_doc 的 pattern 與「第一層沒有就往下找一層」規則 ——
+    判斷「有沒有收到」要跟後面判斷「能不能摘要」同一把尺，兩邊不一致的話
+    會出現「這裡說收到了、那裡說找不到主檔」的鬼故事。
+    """
+    from summarize_doc import _MAIN_DOC_PATTERN as pat
+    try:
+        names = os.listdir(doc_dir)
+    except OSError:
+        return False
+    if any(pat.match(n) for n in names):
+        return True
+    for n in names:
+        sub = os.path.join(doc_dir, n)
+        if os.path.isdir(sub):
+            try:
+                if any(pat.match(m) for m in os.listdir(sub)):
+                    return True
+            except OSError:
+                pass
+    return False
+
+
+def download_report(base=None):
+    """第一段結束後，拿清單上的每一筆去跟磁碟對帳，回 (收到的, 沒收到的)。
+
+    為什麼要多做這一段:`document_system` 那句「共處理 N/N 筆」是按「點過幾筆」
+    算的 —— 點進去之後下載失敗，它照樣 `done += 1`。2026-09-03 實測:清單 2 筆，
+    1 筆成功 1 筆失敗，畫面印的是「共處理 2/2 筆」，跟全部收完長得一模一樣。
+    那支是系管師的檔，這個 fork 不改它（改了兩邊行為會不一樣），所以改成
+    **在 fork 這一側看磁碟再老實報一次**。
+
+    失敗的那幾筆會盡量講出原因:清單「簽核」欄是「紙」的，就是紙本轉線上、
+    來文本文還沒上傳，不是程式壞掉。
+
+    讀不到清單（沒走到那一步、或欄位改名）就回 ([], []) 不亂報 ——
+    寧可什麼都不說，也不要報一份假的對帳。
+    """
+    import list_pager
+    seen = list(list_pager.SIGN_KINDS.keys())
+    if not seen:
+        return [], []
+    if base is None:   # base 可傳入,測試才好塞假的工作區
+        base = os.path.join(os.path.dirname(os.path.abspath(__file__)), "document_download")
+    got, missing = [], []
+    for no in seen:
+        d = os.path.join(base, no)
+        (got if os.path.isdir(d) and _has_main_pdf(d) else missing).append(no)
+
+    print(f"[prep_batch] 逐筆對帳（看磁碟，不看畫面）:清單 {len(seen)} 筆，"
+          f"收到 {len(got)} 筆、沒收到 {len(missing)} 筆。")
+    for no in missing:
+        kind = list_pager.sign_kind(no)
+        if list_pager.is_paper(no):
+            print(f"[prep_batch] ⚠️ {no} 沒收到 —— 這是**紙本轉線上**公文"
+                  f"（清單「簽核」欄＝「{kind}」）。")
+            print("[prep_batch]    來文本文還沒掛進 edoc，所以公文閱覽器裡根本沒有「下載」按鈕。")
+            print("[prep_batch]    要收它:拿到紙本 → 自己掃描 → 在 edoc 勾那一列按「轉線上」")
+            print("[prep_batch]    → 來文 pdf 與附件**分開**上傳 → 再按一次「收新公文」。")
+            print("[prep_batch]    這一步沒辦法自動化（要實體公文和掃描器），不是程式壞掉。")
+        else:
+            print(f"[prep_batch] ⚠️ {no} 沒收到"
+                  f"（清單「簽核」欄＝「{kind or '讀不到'}」）—— 看上面那一筆的訊息。")
+    return got, missing
+
+
 # ── 第二段:離線補摘要 ─────────────────────────────────────────────────────
 
 def summary_stage(targets=None):
@@ -667,6 +737,9 @@ def main():
     elif not ok:
         print("[prep_batch] ⚠️ 下載階段沒有正常結束，可能有公文沒收到 ——")
         print("[prep_batch]    看上面的訊息，必要時再按一次「收新公文」。")
+
+    # 不管上面 ok 是真是假，都拿磁碟對一次帳 —— 「共處理 N/N 筆」會騙人。
+    download_report()
 
     fresh = touched_since(t0)
     if a.download_only:

@@ -88,6 +88,11 @@ def _status(row, doc_dir):
             out.append({"類型": "ok", "文字": f"{gate} OK"})
     if doc_dir and glob.glob(os.path.join(doc_dir, "*含個資.txt")):
         out.append({"類型": "warn", "文字": "含個資，未送 AI"})
+    # 紙本轉線上(掃描影像、主檔抽不到文字層)。summarize_doc 抽不到字時寫這個標記,
+    # 這種公文的附件是實體海報,一定要人親自看 —— 清單上直接講白,別讓它看起來像
+    # 「還沒備料」而被反覆重跑。
+    if doc_dir and glob.glob(os.path.join(doc_dir, "*紙本轉線上需手動處理.txt")):
+        out.append({"類型": "warn", "文字": "紙本轉線上，需手動處理"})
     if not (row.get("擬辦") or "").strip():
         out.append({"類型": "wait", "文字": "無擬辦"})
     elif "請自行填寫" in str(row.get("擬辦")):
@@ -205,7 +210,8 @@ def _files_of(doc_dir):
             return "附件"
         return "其他"
 
-    HIDE = ("內容.txt", "已公告.txt", "已存查.txt", "已陳核.txt", "含個資.txt")
+    HIDE = ("內容.txt", "已公告.txt", "已存查.txt", "已陳核.txt", "含個資.txt",
+            "需手動處理.txt")
     out = []
     for dp, _, names in os.walk(doc_dir):
         for n in sorted(names):

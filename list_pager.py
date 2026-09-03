@@ -87,11 +87,102 @@ _COLLECT_JS = r"""
 """
 
 
+# ── 順手記下每一列的「簽核」欄:線 = 線上簽核, 紙 = 紙本轉線上 ────────────────
+#
+# 紙本公文進 edoc 時清單「簽核」欄是「紙」。這種公文的**來文本文還沒掛上去** ——
+# 要承辦人拿到實體公文、自己掃描,在 edoc 勾那一列按「轉線上」把來文 pdf 上傳,
+# 它才會變成一般電子公文。所以備料點進去只會找不到「下載」按鈕、等 20 秒然後失敗
+# (2026-09-03 實測 MWAA1156008767)。
+#
+# 讀清單的時候一起把這一欄記下來,失敗時才講得出**真正的原因**,而不是丟一句
+# 「下載/解壓縮失敗」讓人自己猜。這一步不上網、不多跑一次 query,附在原本那次
+# column-index 掃描裡。
+SIGN_KINDS = {}
+
+
+def reset_sign_kinds():
+    SIGN_KINDS.clear()
+
+
+def sign_kind(doc_no):
+    """回這筆公文在清單「簽核」欄的字（'線'/'紙'）。沒讀到回 ''。"""
+    return SIGN_KINDS.get(doc_no, "")
+
+
+def is_paper(doc_no):
+    """是不是紙本轉線上(尚未上傳來文 pdf)的公文。"""
+    return sign_kind(doc_no).startswith("紙")
+
+
+# 同一次掃描順便撈「簽核」欄。找不到那個表頭(欄位改名/別張清單)時 idxSign = -1,
+# 公文號照樣讀得到 —— 記不到簽核別只是少了原因提示,不能讓它害整個備料讀不到清單。
+_COLLECT_SIGN_JS = r"""
+    var pat = /^[A-Z][A-Z0-9]*\d{4,}$/;
+    var out = [];
+    var ths = document.querySelectorAll('th');
+    for (var i = 0; i < ths.length; i++) {
+        if ((ths[i].textContent || '').trim().indexOf('公文文號') === -1) continue;
+        var headerRow = ths[i].parentElement;
+        if (!headerRow) continue;
+        var idx = -1, idxSign = -1;
+        for (var j = 0; j < headerRow.children.length; j++) {
+            if (headerRow.children[j] === ths[i]) idx = j;
+            var h = (headerRow.children[j].textContent || '').replace(/\s/g, '');
+            if (h === '簽核') idxSign = j;
+        }
+        if (idx === -1) continue;
+        var table = ths[i].closest('table');
+        if (!table) continue;
+        var rows = table.querySelectorAll('tbody tr');
+        var seen = {};
+        for (var k = 0; k < rows.length; k++) {
+            var cells = rows[k].children;
+            if (idx >= cells.length) continue;
+            var t = (cells[idx].textContent || '').trim();
+            if (!pat.test(t) || seen[t]) continue;
+            seen[t] = 1;
+            var sign = '';
+            if (idxSign !== -1 && idxSign < cells.length) {
+                sign = (cells[idxSign].textContent || '').replace(/\s/g, '');
+            }
+            out.push({no: t, sign: sign});
+        }
+        break;
+    }
+    return out;
+"""
+
+
 def page_doc_nos(driver):
     """讀**目前這一頁**清單上的公文號（依畫面順序、去重）。讀不到回 []。
 
+    順便把每一列的「簽核」欄記進 SIGN_KINDS（見上面那段）。
+
     呼叫前要先切到含「公文文號」表頭的 frame。
     """
+    try:
+        rows = driver.execute_script(_COLLECT_SIGN_JS) or []
+    except Exception as e:
+        print(f"[pager] 讀簽核欄失敗（改用只讀公文號）:{type(e).__name__}: {e}")
+        rows = None
+    # 形狀不對(假 driver 回 True、頁面回怪東西)就別硬吃 —— 退回舊路,
+    # 舊路自己有 try/except,壞掉最多讀不到公文號,不會把整個備料炸掉。
+    if isinstance(rows, (list, tuple)) and rows:
+        nos = []
+        for r in rows:
+            # dict = 有讀到「簽核」欄;字串 = 只有公文號(舊 JS 的形狀,測試的假
+            # driver 也是這個形狀)。兩種都要收,否則清單會整個讀成空的。
+            if isinstance(r, dict):
+                no = (r.get("no") or "").strip()
+                kind = (r.get("sign") or "").strip()
+            else:
+                no, kind = str(r or "").strip(), ""
+            if not no:
+                continue
+            nos.append(no)
+            if kind:
+                SIGN_KINDS[no] = kind
+        return nos
     try:
         return list(driver.execute_script(_COLLECT_JS) or [])
     except Exception as e:
@@ -276,6 +367,8 @@ def walk_pages(driver, expect=-1, max_pages=MAX_PAGES):
     回來時 driver 停在**最後一頁**。要回第 1 頁請呼叫端自己重點左側選單。
     """
     warn = []
+    # 每次重走清單都從乾淨的簽核別開始 —— 上一輪的殘留會讓失敗原因報到別筆去。
+    reset_sign_kinds()
     first = page_doc_nos(driver)
     if not first:
         return [], ["清單上一筆公文號都沒讀到 —— 現在畫面上可能不是公文清單。"]

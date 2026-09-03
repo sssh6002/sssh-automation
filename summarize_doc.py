@@ -85,6 +85,30 @@ ANTHROPIC_SDK_MODEL = "claude-opus-4-7"
 # 避免無關附件撐爆 LLM 輸入。此 pattern 在 spec/code 兩處有冗餘 — 改 spec 時記得同步。
 _MAIN_DOC_PATTERN = re.compile(r'^\d+_\d+[A-Z]?\.pdf$')
 
+# 紙本轉線上公文的辨識門檻(2026-09-03 新增)。
+# 來源:紙本公文送到承辦人手上 → **承辦人自己掃描** → 在 edoc 勾該列按「轉線上」,
+# 把來文本文 pdf 與附件**分開**上傳(edoc 明文要求,不可掃成同一個 pdf)。
+# 轉完之後它就是一般電子公文(清單「簽核」欄由「紙」變「線」),但**主檔內容是
+# 掃描影像、沒有文字層**,pypdf 一個字也抽不到。
+# 承辦人實務:這種公文幾乎 100% 是「附件為實體海報、內容請求張貼海報」,本來就
+# 得親自看實體附件才辦得了 → 一律標記交回人工,不送 LLM(送了只會照零星雜訊瞎編)。
+# 基準:一般電子公文主檔抽得到上千字(實測 MWAA1156008753 = 1547 字)。門檻取 100 字
+# —— 掃描器附帶的 OCR 就算撈到零星幾個字,也不足以做總結。誤判就改這個數字。
+_MIN_MAIN_PDF_CHARS = 100
+_SCAN_MARKER_SUFFIX = "紙本轉線上需手動處理.txt"
+
+# 標記檔內容(要改字就改這裡 —— 這是給人看的,不會送進 LLM)。
+_SCAN_MARKER_TEXT = """紙本轉線上公文,需手動處理。
+
+主檔 PDF 抽不到文字層(掃描影像),沒有文字可以送 AI 做總結。
+實際抽字結果:{detail}(門檻 {floor} 字)。
+
+這類公文的來源:紙本送到承辦人手上 → 承辦人自己掃描 → 在 edoc 勾該列按「轉線上」,
+把來文本文 pdf 與附件分開上傳。所以主檔一定是掃描影像,不會有文字層。
+依承辦人經驗,內容幾乎都是「附件為實體海報,請求張貼海報」,本來就得親自看實體
+附件才辦得了 —— 請自行處理,不要等系統摘要。
+"""
+
 # LLM(尤其 gemini-flash 類)對「輸出格式」的遵從是機率性的,偶爾會吐出 agentic
 # 前綴(如 update_topic{...})或漏宣告檔名,導致 _parse_response 解析失敗。這類失敗
 # 重試通常就能拿到正常回應。每個目錄最多嘗試 _SUMMARIZE_MAX_ATTEMPTS 次(= 首次
@@ -675,15 +699,32 @@ def summarize_doc(doc_dir):
         return None
     by_name = {p.name: p for p in files}
 
-    pdf_texts = {}
-    for name in inventory:
-        if not _MAIN_DOC_PATTERN.match(name):
-            continue
-        raw = _pdf_to_text(by_name[name])
-        if raw.strip():
-            pdf_texts[name] = _clean_pdf_text(raw)
-    if not pdf_texts:
+    main_names = [n for n in inventory if _MAIN_DOC_PATTERN.match(n)]
+    if not main_names:
         print(f"[ERROR] {doc_dir.name}:找不到主檔 PDF(數字_數字[A-Z]?.pdf)")
+        return None
+
+    # 「沒有主檔」與「主檔抽不到字」分開報。舊版兩種情況都印「找不到主檔 PDF」,
+    # 檔案明明躺在目錄裡卻說找不到,會害人往檔名 pattern 的方向查半天 ——
+    # 這個 fork 最常見的坑型就是「訊息與事實不符」。
+    pdf_texts = {}
+    char_counts = {}
+    for name in main_names:
+        raw = _pdf_to_text(by_name[name])
+        cleaned = _clean_pdf_text(raw) if raw.strip() else ""
+        char_counts[name] = len(cleaned.strip())
+        if cleaned.strip():
+            pdf_texts[name] = cleaned
+
+    if sum(char_counts.values()) < _MIN_MAIN_PDF_CHARS:
+        detail = "、".join(f"{n} 抽到 {c} 字" for n, c in sorted(char_counts.items()))
+        stem = sorted(main_names)[0].rsplit(".", 1)[0]
+        marker = doc_dir / f"{stem}{_SCAN_MARKER_SUFFIX}"
+        marker.write_text(
+            _SCAN_MARKER_TEXT.format(detail=detail, floor=_MIN_MAIN_PDF_CHARS),
+            encoding="utf-8")
+        print("      [跳過] 主檔抽不到文字層(掃描影像)→ 紙本轉線上,需手動處理")
+        print(f"          {detail}(門檻 {_MIN_MAIN_PDF_CHARS} 字)→ {marker.name}")
         return None
     print(f"      抽到 {len(pdf_texts)} 份 PDF 文字:{list(pdf_texts.keys())}")
 

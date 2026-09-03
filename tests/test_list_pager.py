@@ -208,3 +208,51 @@ def test_dangerous_buttons_are_blacklisted(word):
     """清單頁上這些按鈕按下去不可復原 —— 翻頁的 JS 必須把它們排除。"""
     bad_block = lp._NEXT_JS.split("var PAGER")[0]
     assert word in bad_block
+
+
+# ───────── 清單「簽核」欄:線上簽核 / 紙本轉線上 ─────────
+# 紙本轉線上的公文來文本文還沒上傳,備料一定收不到。讀清單時記下這一欄,
+# 失敗時才講得出真正的原因(2026-09-03 MWAA1156008767 實測)。
+
+class FakeSignList:
+    """execute_script 回 [{no, sign}, …] —— 有讀到「簽核」欄的清單。"""
+
+    def __init__(self, rows):
+        self.rows = rows
+
+    def execute_script(self, script, *args):
+        if "idxSign" in script:
+            return [dict(r) for r in self.rows]
+        return [r["no"] for r in self.rows]
+
+
+def test_page_doc_nos_records_sign_column():
+    lp.reset_sign_kinds()
+    d = FakeSignList([{"no": "MWAA1156008753", "sign": "線"},
+                      {"no": "MWAA1156008767", "sign": "紙"}])
+    assert lp.page_doc_nos(d) == ["MWAA1156008753", "MWAA1156008767"]
+    assert lp.sign_kind("MWAA1156008767") == "紙"
+    assert lp.is_paper("MWAA1156008767") is True
+    assert lp.is_paper("MWAA1156008753") is False
+
+
+def test_sign_kind_unknown_doc_is_blank_not_paper():
+    lp.reset_sign_kinds()
+    assert lp.sign_kind("MWAA0000000000") == ""
+    assert lp.is_paper("MWAA0000000000") is False
+
+
+def test_page_doc_nos_still_works_without_sign_column():
+    """欄位改名/別張清單讀不到「簽核」時,公文號照樣要讀得到。"""
+    lp.reset_sign_kinds()
+    d = FakeSignList([{"no": "MWAA1156008753", "sign": ""}])
+    assert lp.page_doc_nos(d) == ["MWAA1156008753"]
+    assert lp.sign_kind("MWAA1156008753") == ""
+
+
+def test_walk_pages_clears_previous_sign_kinds():
+    """上一輪的殘留會讓失敗原因報到別筆去 —— 重走清單要先清空。"""
+    lp.reset_sign_kinds()
+    lp.SIGN_KINDS["MWAA_舊的"] = "紙"
+    lp.walk_pages(FakeList([["MWAA1156008753"]], next_returns_none=True))
+    assert "MWAA_舊的" not in lp.SIGN_KINDS

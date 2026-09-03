@@ -633,3 +633,74 @@ def test_dialog_path_override_is_restored():
         with pb.unicode_safe_dialog_path():
             raise RuntimeError("中斷")
     assert pdh._send_text_vk is real
+
+
+# ───────── 第一段跑完的逐筆對帳 ─────────
+# document_system 那句「共處理 N/N 筆」是按「點過幾筆」算的,下載失敗照樣加一。
+# 2026-09-03 實測:清單 2 筆、1 成功 1 失敗,畫面照樣印「共處理 2/2 筆」。
+# 那支是系管師的檔不能改,所以在 fork 這側看磁碟再報一次。
+
+def _make_workspace(tmp_path, *, with_main=(), empty=()):
+    for no in with_main:
+        d = tmp_path / no
+        d.mkdir()
+        (d / "29391312_11530938061.pdf").write_bytes(b"%PDF-1.4")
+    for no in empty:
+        (tmp_path / no).mkdir()
+    return str(tmp_path)
+
+
+def test_download_report_counts_disk_not_screen(tmp_path, monkeypatch, capsys):
+    import list_pager as lp
+    lp.reset_sign_kinds()
+    lp.SIGN_KINDS.update({"MWAA1156008753": "線", "MWAA1156008767": "紙"})
+    base = _make_workspace(tmp_path, with_main=["MWAA1156008753"])
+
+    got, missing = pb.download_report(base=base)
+    assert got == ["MWAA1156008753"]
+    assert missing == ["MWAA1156008767"]
+    out = capsys.readouterr().out
+    assert "收到 1 筆、沒收到 1 筆" in out
+
+
+def test_download_report_names_paper_doc_as_the_reason(tmp_path, capsys):
+    import list_pager as lp
+    lp.reset_sign_kinds()
+    lp.SIGN_KINDS.update({"MWAA1156008767": "紙"})
+    base = _make_workspace(tmp_path)
+
+    pb.download_report(base=base)
+    out = capsys.readouterr().out
+    assert "紙本轉線上" in out
+    assert "轉線上" in out and "掃描" in out
+
+
+def test_download_report_does_not_blame_paper_when_sign_is_online(tmp_path, capsys):
+    """線上簽核的公文收不到是別的原因,不可以推給紙本。"""
+    import list_pager as lp
+    lp.reset_sign_kinds()
+    lp.SIGN_KINDS.update({"MWAA1156008753": "線"})
+    base = _make_workspace(tmp_path)
+
+    pb.download_report(base=base)
+    out = capsys.readouterr().out
+    assert "紙本轉線上" not in out
+
+
+def test_download_report_stays_quiet_when_list_unread(tmp_path, capsys):
+    """讀不到清單就什麼都不報 —— 寧可不說,也不要報一份假的對帳。"""
+    import list_pager as lp
+    lp.reset_sign_kinds()
+    assert pb.download_report(base=str(tmp_path)) == ([], [])
+    assert capsys.readouterr().out == ""
+
+
+def test_download_report_empty_dir_counts_as_missing(tmp_path, capsys):
+    """目錄建了但沒有來文主檔,等於沒收到 —— 不能算成功。"""
+    import list_pager as lp
+    lp.reset_sign_kinds()
+    lp.SIGN_KINDS.update({"MWAA1156008767": "紙"})
+    base = _make_workspace(tmp_path, empty=["MWAA1156008767"])
+
+    got, missing = pb.download_report(base=base)
+    assert got == [] and missing == ["MWAA1156008767"]

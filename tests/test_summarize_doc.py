@@ -383,3 +383,62 @@ def test_dominant_model_handles_empty_and_odd_shapes():
     assert _dominant_model({}) is None
     assert _dominant_model(None) is None
     assert _dominant_model({"only": None}) == "only"
+
+
+# ───────────────── 紙本轉線上(掃描影像、主檔無文字層) ─────────────────
+# 文書組收到實體公文 → 掃成 PDF → 承辦人在 edoc 按「轉線上」。轉完之後它是一般
+# 電子公文,但主檔是掃描影像、pypdf 抽不到字。這種公文的附件是實體海報,只能人工
+# 辦 —— 不可以送 LLM(零星雜訊會被瞎編成一份像模像樣的假摘要)。
+
+def _make_doc_dir(tmp_path, name="MWAA1156008767", main="29391312_11530938061.pdf"):
+    d = tmp_path / name
+    d.mkdir()
+    (d / main).write_bytes(b"%PDF-1.4 fake")
+    return d
+
+
+def test_scanned_main_pdf_writes_manual_marker_and_skips_llm(tmp_path, monkeypatch):
+    d = _make_doc_dir(tmp_path)
+    monkeypatch.setattr(sd, "_pdf_to_text", lambda p: "")
+    called = []
+    monkeypatch.setattr(sd, "_call_backends", lambda prompt: called.append(prompt) or (None, None, None))
+
+    assert sd.summarize_doc(d) is None
+    assert called == [], "掃描件不可以送 LLM"
+    markers = list(d.glob("*紙本轉線上需手動處理.txt"))
+    assert len(markers) == 1
+    body = markers[0].read_text(encoding="utf-8")
+    assert "紙本轉線上" in body and "海報" in body
+
+
+def test_ocr_scraps_below_threshold_still_marked_manual(tmp_path, monkeypatch):
+    """掃描器附帶 OCR 撈到零星幾個字 —— 一樣不夠做總結,照樣交回人工。"""
+    d = _make_doc_dir(tmp_path)
+    monkeypatch.setattr(sd, "_pdf_to_text", lambda p: "臺北市 松山 高中\n海報\n")
+    called = []
+    monkeypatch.setattr(sd, "_call_backends", lambda prompt: called.append(prompt) or (None, None, None))
+
+    assert sd.summarize_doc(d) is None
+    assert called == []
+    assert len(list(d.glob("*紙本轉線上需手動處理.txt"))) == 1
+
+
+def test_normal_text_layer_is_not_marked_as_paper(tmp_path, monkeypatch):
+    """一般電子公文(主檔有文字層)不可以被誤標成紙本轉線上。"""
+    d = _make_doc_dir(tmp_path)
+    monkeypatch.setattr(sd, "_pdf_to_text", lambda p: "檢送本會辦理研習資訊一案,請查照。" * 20)
+    monkeypatch.setattr(sd, "_call_backends", lambda prompt: (None, None, None))
+
+    sd.summarize_doc(d)
+    assert list(d.glob("*紙本轉線上需手動處理.txt")) == []
+
+
+def test_no_main_pdf_at_all_is_not_marked_as_paper(tmp_path, monkeypatch):
+    """目錄裡根本沒有主檔 → 是「找不到主檔」,不是掃描件,不可以寫紙本標記。"""
+    d = tmp_path / "MWAA1156000000"
+    d.mkdir()
+    (d / "隨便.pdf").write_bytes(b"%PDF-1.4 fake")
+    monkeypatch.setattr(sd, "_pdf_to_text", lambda p: "")
+
+    assert sd.summarize_doc(d) is None
+    assert list(d.glob("*紙本轉線上需手動處理.txt")) == []
