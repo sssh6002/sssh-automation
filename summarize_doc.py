@@ -58,9 +58,18 @@ MODEL_PLACEHOLDER = "<<MODEL>>"
 DEFAULT_LLM_ORDER = ("antigravity", "aistudio", "claude", "anthropic")
 _KNOWN_BACKENDS = set(DEFAULT_LLM_ORDER)
 
-# aistudio (Gemini REST) 未指定 summarize_aistudio_model 時的預設模型
-# (2026-06-24 實測此免費層 key 可用 gemini-2.5-flash)。
-AISTUDIO_DEFAULT_MODEL = "gemini-2.5-flash"
+# aistudio (Gemini REST) 未指定 summarize_aistudio_model 時的預設模型。
+#
+# 2026-09-16 換掉原本的 gemini-2.5-flash:那支對**新申請的 key** 已關閉,
+# 呼叫直接回 404,訊息是「no longer available to new users…use gemini-3.6-flash」。
+# 坑在於它**仍然列在 ListModels 清單裡**,所以「查得到模型」不代表「叫得動」——
+# 當天先照清單確認模型存在,反而往錯的方向查。要驗就真的打一次 generateContent。
+#
+# 舊 key 照樣能用 2.5,所以這個雷只有新裝機 / 新辦 key 的人會踩到
+# (承辦人這台是當天新辦的 key 才炸出來的)。以後若 3.6 也被關,錯誤訊息裡會直接
+# 寫建議改用哪一支,照著換即可;不想動 Python 就在 env.env 填
+# summarize_aistudio_model= 蓋過去,那條路優先於這裡。
+AISTUDIO_DEFAULT_MODEL = "gemini-3.6-flash"
 
 # aistudio 暫時性錯誤重試:Gemini 免費層偶爾回 503(模型過載)/429(限流)等,
 # 屬暫時性,重試多半就過。非這些碼(如 400/403)直接放棄。
