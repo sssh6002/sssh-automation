@@ -269,3 +269,75 @@ def test_private_keys_not_written_as_columns(tmp_path, sheet):
     ws = openpyxl.load_workbook(sheet).worksheets[0]
     assert [c.value for c in ws[1]] == rs.COLUMNS
     assert _cell(sheet, 2, "主旨") == "甲"
+
+
+# ── 「只差存查」的狀態（2026-09-22）─────────────────────────────────────────
+#
+# 起因:番茄問「為什麼辦完的文還停在摘要」。當時清單上 13 筆都是陳核跑完、校網
+# 也貼了，只差結案存查，但畫面上只看得到「陳會 OK／張貼 OK」兩個綠燈,沒有任何
+# 東西說還缺一關。這一組測試釘的就是「缺哪一關要講出來」。
+
+NO_POST_SUMMARY = """#存查分類:總務 03750402
+##文存備查
+###陳會
+####
+
+主旨：檢送本校圖書館出版主題桌遊相關資訊，請查照。
+
+1. 摘要條列一。
+"""
+
+
+def _stage_dir(tmp_path, name="MWAA1156009438", *, 陳核=False, 公告=False,
+               存查=False, summary=SUMMARY):
+    """照施工階段擺痕跡檔,回資料夾路徑。"""
+    d = tmp_path / name
+    d.mkdir()
+    (d / "123_456內容.txt").write_text(CONTENT, encoding="utf-8")
+    (d / "123_456總結.claude.md").write_text(summary, encoding="utf-8")
+    if 陳核:
+        (d / f"{name}已陳核.txt").write_text("x", encoding="utf-8")
+    if 公告:
+        (d / "123_456已公告.txt").write_text("x", encoding="utf-8")
+    if 存查:
+        (d / "123_456已存查.txt").write_text("x", encoding="utf-8")
+    return str(d)
+
+
+def test_pending_archive_when_posted_but_not_archived(tmp_path):
+    """陳核跑完、校網貼了、就差存查 —— 這就是番茄卡住的那 13 筆。"""
+    d = _stage_dir(tmp_path, 陳核=True, 公告=True)
+    row = {"陳會": "OK", "張貼": "OK"}
+    assert rs.is_archived(row, d) is False
+    assert rs.pending_archive(row, d) is True
+
+
+def test_pending_archive_when_no_announcement_needed(tmp_path):
+    """不用公告的公文止於存查,沒存查就是待存查。"""
+    d = _stage_dir(tmp_path, 陳核=True, summary=NO_POST_SUMMARY)
+    assert rs.pending_archive({"陳會": "OK", "張貼": None}, d) is True
+
+
+def test_pending_archive_false_while_still_waiting_to_post(tmp_path):
+    """要公告卻還沒貼 —— 缺的是張貼,不是存查,不可以掛「待存查」誤導人。"""
+    d = _stage_dir(tmp_path, 陳核=True)
+    assert rs.pending_archive({"陳會": "OK", "張貼": "OK"}, d) is False
+
+
+def test_pending_archive_false_before_anything_ran(tmp_path):
+    """剛收進來的新公文不是待存查 —— 否則整張清單每一筆都掛這個標籤,等於沒講。"""
+    d = _stage_dir(tmp_path)
+    assert rs.pending_archive({"陳會": None, "張貼": None}, d) is False
+
+
+def test_pending_archive_false_once_archived(tmp_path):
+    """存查做完就進舊文了,不該還說它待存查。"""
+    d = _stage_dir(tmp_path, 陳核=True, 公告=True, 存查=True)
+    row = {"陳會": "OK", "張貼": "OK"}
+    assert rs.is_archived(row, d) is True
+    assert rs.pending_archive(row, d) is False
+
+
+def test_pending_archive_false_without_folder(tmp_path):
+    """資料夾不在了就查不出缺哪一關,保守不掛標籤。"""
+    assert rs.pending_archive({"陳會": "OK", "張貼": "OK"}, None) is False

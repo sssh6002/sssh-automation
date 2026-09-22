@@ -86,6 +86,13 @@ def _status(row, doc_dir):
             out.append({"類型": "done", "文字": f"{gate}已辦"})
         elif rs.is_approved(v):
             out.append({"類型": "ok", "文字": f"{gate} OK"})
+    # 只差結案存查 —— 2026-09-22 番茄問「為什麼辦完的文還停在摘要」。上面兩個關卡
+    # 欄位都綠了(陳核跑過、校網也貼了),看起來像辦完,但摘要頁放人的條件是
+    # 「已存查 ＋（不用公告 or 已張貼）」,少了存查就不會走。綠燈不講這件事,
+    # 所以另外掛一個標籤把欠的那一關說出來。判斷在 rs.pending_archive,
+    # 與 is_archived 共用同一組痕跡,不另立標準。
+    if rs.pending_archive(row, doc_dir):
+        out.append({"類型": "wait", "文字": "待存查"})
     if doc_dir and glob.glob(os.path.join(doc_dir, "*含個資.txt")):
         out.append({"類型": "warn", "文字": "含個資，未送 AI"})
     # 紙本轉線上(掃描影像、主檔抽不到文字層)。summarize_doc 抽不到字時寫這個標記,

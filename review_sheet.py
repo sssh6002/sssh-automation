@@ -367,23 +367,73 @@ def is_archived(row, doc_dir):
     # 你自己宣告辦完 —— 不看磁碟,也不管資料夾還在不在。
     if is_done(row.get("陳會")) and is_done(row.get("張貼")):
         return True
+    names = _marker_names(doc_dir)
+    if names is None:
+        return False
+    if not _has_marker(names, "已存查.txt"):
+        return False
+    return _posting_settled(row, doc_dir, names)
+
+
+def _marker_names(doc_dir):
+    """回資料夾內的檔名 list;資料夾不在或讀不到回 None（呼叫端一律保守處理）。"""
     if not doc_dir or not os.path.isdir(doc_dir):
-        return False
+        return None
     try:
-        names = os.listdir(doc_dir)
+        return os.listdir(doc_dir)
     except OSError:
-        return False
-    if not any(n.endswith("已存查.txt") for n in names):
-        return False
-    if any(n.endswith("已公告.txt") for n in names) or is_done(row.get("張貼")):
+        return None
+
+
+def _has_marker(names, suffix):
+    return any(n.endswith(suffix) for n in names)
+
+
+def _posting_settled(row, doc_dir, names):
+    """公告那一側是否已經沒事了:貼過了、你標了已辦、或本來就不用公告。
+
+    `is_archived` 與 `pending_archive` 共用這一個判斷 —— 拆成兩份會長歪成
+    「舊文認定不用公告、標籤卻說還在等張貼」那種自相矛盾。
+    """
+    if _has_marker(names, "已公告.txt") or is_done(row.get("張貼")):
         return True
-    # 走到這:已存查、但還沒張貼 → 只有「本來就不用公告」才算辦完。
     try:
         from document_closure.document_closure_post_web import (
             _parse_summary, _should_post)
         return not _should_post(_parse_summary(doc_dir))
     except Exception:
         return False
+
+
+def pending_archive(row, doc_dir):
+    """這筆是不是**只差最後一關結案存查**。
+
+    2026-09-22 加。起因:番茄問「為什麼辦完的文還停在摘要」—— 當時 13 筆陳核
+    跑完、校網也貼了,只差存查,但清單上只有「陳會 OK／張貼 OK」兩個綠燈,
+    看起來像辦完了卻不肯消失。缺哪一關,畫面要自己講。
+
+    成立條件(三個都要):
+    - 還沒辦完(`is_archived` 為 False),否則它早就在舊文頁了。
+    - 陳核已經跑過:目錄有 *已陳核.txt,或「陳會」欄標了已辦。
+      **不能省** —— 存查一定排在陳核後面,剛收進來的新公文缺的是陳核不是存查,
+      對它掛「待存查」會讓整張清單每一筆都掛同一個標籤,等於沒講。
+      為什麼不看「陳會=OK」:OK 是「請程式去陳核」,不是「陳核跑完了」。
+      實際跑完的痕跡只有磁碟上那個檔(sync 不會把使用者打的 OK 改寫成已辦)。
+    - 公告那一側已經結束(貼過、標已辦、或不用公告),沿用 `_posting_settled`。
+      還在等張貼的,缺的是張貼,不是存查。
+
+    資料夾不在 → 回 False。查不出缺哪一關時不亂猜。
+    """
+    if is_archived(row, doc_dir):
+        return False
+    names = _marker_names(doc_dir)
+    if names is None:
+        return False
+    if _has_marker(names, "已存查.txt"):
+        return False
+    if not (_has_marker(names, "已陳核.txt") or is_done(row.get("陳會"))):
+        return False
+    return _posting_settled(row, doc_dir, names)
 
 
 def approved(gate, path=None):
