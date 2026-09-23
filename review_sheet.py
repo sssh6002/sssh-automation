@@ -394,9 +394,23 @@ def _posting_settled(row, doc_dir, names):
 
     `is_archived` 與 `pending_archive` 共用這一個判斷 —— 拆成兩份會長歪成
     「舊文認定不用公告、標籤卻說還在等張貼」那種自相矛盾。
+
+    ⚠️ 「貼過了」不能只看 `doc_dir` 內現在還在不在 *已公告.txt。存查會把公文夾
+    從 document_download 搬到 document_download_closure、重新解壓成「全新」
+    資料夾,標記檔跟著消失是已知情況(見 document_closure_post_web.py 開頭那段
+    註解)——2026-09-23 實測 13 筆先貼過才存查的公文,搬過去之後資料夾裡確實
+    沒有 *已公告.txt,「陳會 OK／張貼 OK」卡在摘要頁永遠不會移舊文。`post_web_batch`
+    的 `posted_detail` 翻的是全部 `SCAN_DIRS` 的清冊,不受資料夾搬家影響,一併
+    問過才不會漏掉這種「貼的時候在 A 區、現在人在 B 區」的公文。
     """
     if _has_marker(names, "已公告.txt") or is_done(row.get("張貼")):
         return True
+    try:
+        import post_web_batch as pwb
+        if any(pwb.posted_detail(doc_dir)):
+            return True
+    except Exception:
+        pass
     try:
         from document_closure.document_closure_post_web import (
             _parse_summary, _should_post)

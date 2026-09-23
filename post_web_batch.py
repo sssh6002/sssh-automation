@@ -27,8 +27,10 @@ post_web_batch.py
 
 import argparse
 import contextlib
+import csv
 import json
 import os
+import re
 import sys
 import time
 
@@ -109,6 +111,120 @@ def chrome_in_the_way():
             "再貼。（陳核／存查要它開著，張貼相反 —— 張貼不碰 edoc、不用插卡。）")
 
 
+# ── 「已經公告過了」要講清楚是什麼時候、貼到哪一板 ─────────────────────────
+
+def _fmt_when(raw):
+    """標記裡的 ISO 時間 → 「2026-09-14 08:48」。認不出來就原樣回傳。"""
+    m = re.match(r"(\d{4}-\d{2}-\d{2})T(\d{2}:\d{2})", str(raw or "").strip())
+    return f"{m.group(1)} {m.group(2)}" if m else (str(raw or "").strip() or None)
+
+
+def _detail_from_marker(extract_dir):
+    """從公文夾內的 *已公告.txt 讀 (時間, 板名)。三行格式:
+
+        2026-09-14T08:48:55_已公告。
+        主旨:【活動】…
+        公告於:圖書館公告。同步顯示於:硏習資訊+處室公告。
+
+    舊的單行格式（只有第一行、沒有句號）也吃得下,那種就只有時間、沒有板名。
+    """
+    try:
+        names = [n for n in sorted(os.listdir(extract_dir))
+                 if n.endswith("已公告.txt")]
+    except OSError:
+        return None, None
+    for n in names:
+        try:
+            with open(os.path.join(extract_dir, n), encoding="utf-8") as f:
+                lines = [ln.strip() for ln in f.read().splitlines() if ln.strip()]
+        except (OSError, ValueError):
+            continue
+        when = board = None
+        for ln in lines:
+            if when is None and "_已公告" in ln:
+                when = _fmt_when(ln.split("_已公告", 1)[0])
+            if board is None and ln.startswith("公告於:"):
+                board = ln[len("公告於:"):].split("。", 1)[0].strip() or None
+        if when or board:
+            return when, board
+    return None, None
+
+
+def _ledger_candidates(extract_dir):
+    """要翻哪幾份 _已公告清單.csv。**每個工作區根目錄各有一份**。
+
+    公文夾自己那一份排第一（`_ledger_path` 算的就是它），其餘 `SCAN_DIRS` 的
+    接在後面 —— 張貼是在收文區（document_download）做的、標記與清冊寫在那邊，
+    但結案會把公文夾搬到 document_download_closure，搬過去之後就只翻得到
+    結案區那一份清冊、查不到當初那一列。查閱要翻全部，才問得出「何時貼的」。
+    """
+    from document_closure.document_closure_post_web import _ledger_path
+    out, seen = [], set()
+    for path in ([_ledger_path(extract_dir)]
+                 + [os.path.join(b, "_已公告清單.csv") for b in rs.SCAN_DIRS]):
+        key = os.path.normcase(os.path.abspath(path))
+        if key not in seen:
+            seen.add(key)
+            out.append(path)
+    return out
+
+
+def _detail_from_ledger(extract_dir):
+    """翻各工作區的 _已公告清單.csv 找這份公文的 (時間, 板名)。
+
+    欄位:公文檔號、時間、主旨、公告於、同步顯示於。檔號沿用 `document_closure`
+    既有那支算,不另立一套。讀壞的清冊跳過、不讓查閱把畫面弄掛。
+    """
+    from document_closure.document_closure_post_web import _doc_no_of
+    doc_no = _doc_no_of(extract_dir)
+    for path in _ledger_candidates(extract_dir):
+        try:
+            with open(path, encoding="utf-8-sig", newline="") as f:
+                for row in csv.reader(f):
+                    if row and row[0] == doc_no:
+                        when = _fmt_when(row[1]) if len(row) > 1 else None
+                        board = (row[3].strip() or None) if len(row) > 3 else None
+                        if when or board:
+                            return when, board
+        except (OSError, ValueError, csv.Error):
+            continue
+    return None, None
+
+
+def posted_detail(extract_dir):
+    """這份公文上次公告的 (時間, 板名);查不到回 (None, None)。**只讀不寫**。
+
+    2026-09-15 番茄在畫面上看到「已經公告過了」卻在校網首頁找不到那兩則 ——
+    其實有貼成功,他停在首頁預設的「重要消息」分頁,而那兩則掛的是圖書館公告。
+    訊息只寫「已經公告過了」的話他沒辦法自己驗證,只能回頭一筆一筆問。
+    把時間與板名一起印出來,他就能直接去那一板對。
+
+    來源順序比照 `_already_announced` 的判定順序:先公文夾內的 *已公告.txt,
+    再結案根目錄的清冊。人工手動丟一個 *已公告.txt 標「免公告」是允許的用法,
+    那種內容解不出來很正常 —— 解不出來就退回清冊,再不行回 (None, None),
+    由呼叫端印回原本那句籠統的。
+    """
+    if not extract_dir or not os.path.isdir(extract_dir):
+        return None, None
+    when, board = _detail_from_marker(extract_dir)
+    if when and board:
+        return when, board
+    l_when, l_board = _detail_from_ledger(extract_dir)
+    return (when or l_when), (board or l_board)
+
+
+def already_announced_why(extract_dir):
+    """被「已經公告過了」擋下時，畫面上那一行字。"""
+    when, board = posted_detail(extract_dir)
+    if when and board:
+        return f"已經公告過了（{when} 貼到 {board}）"
+    if when:
+        return f"已經公告過了（{when} 貼的）"
+    if board:
+        return f"已經公告過了（貼到 {board}）"
+    return "已經公告過了（資料夾有 *已公告.txt，或清冊裡有登錄）"
+
+
 # ── 判定 ───────────────────────────────────────────────────────────────────
 
 def evaluate(row):
@@ -148,8 +264,16 @@ def evaluate(row):
     summary = _parse_summary(d)
     if not _should_post(summary):
         return stop("擬辦不是要公告（承辦文字沒有「公佈周知／於官網公告」）")
-    if _already_announced(d):
-        return stop("已經公告過了（資料夾有 *已公告.txt，或清冊裡already有）")
+    # ⚠️ `_already_announced`（原作者那支）只翻公文夾「目前」所在那個工作區根目錄
+    # 的清冊。存查會把公文夾從 document_download 搬到 document_download_closure、
+    # 重新解壓成「全新」資料夾（見 document_closure_post_web.py 開頭那段註解）——
+    # 標記檔跟著消失是已知情況，但清冊那一列**留在舊工作區**，搬過去那邊翻不到，
+    # 已經貼過的公文因此又冒出來一次。`posted_detail` 翻的是全部 `SCAN_DIRS`，
+    # 兩邊一起判斷才不會漏掉「貼的時候在 A 區、現在人在 B 區」這種情況
+    # （2026-09-23 番茄實測 MWAA1156009438:校網上真的貼出去了，張貼頁卻還在顯示
+    # 「會貼上校網」）。
+    if _already_announced(d) or any(posted_detail(d)):
+        return stop(already_announced_why(d))
     out["分類"] = (summary or {}).get("sync_categories") or []
     # 附件名稱會**出現在校網上**（家長看得到的就是這幾個檔名），所以預覽就要
     # 看得到「實際會傳哪幾個」。判定不另立標準:承辦人在摘要頁勾過的話，

@@ -12,6 +12,7 @@ import pytest
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
+import post_web_batch as pwb  # noqa: E402
 import review_sheet as rs  # noqa: E402
 
 openpyxl = pytest.importorskip("openpyxl")
@@ -288,9 +289,16 @@ NO_POST_SUMMARY = """#存查分類:總務 03750402
 """
 
 
-def _stage_dir(tmp_path, name="MWAA1156009438", *, 陳核=False, 公告=False,
-               存查=False, summary=SUMMARY):
-    """照施工階段擺痕跡檔,回資料夾路徑。"""
+def _stage_dir(tmp_path, monkeypatch, name="MWAA1156009438", *, 陳核=False,
+               公告=False, 存查=False, summary=SUMMARY):
+    """照施工階段擺痕跡檔,回資料夾路徑。
+
+    `_posting_settled` 現在會問 `post_web_batch.posted_detail`（翻 `rs.SCAN_DIRS`
+    的清冊），不隔離的話會翻到本機真的 `document_download*/_已公告清單.csv` ——
+    這裡剛好用真實跑過的文號當預設值，曾經真的在清冊裡對到，把測試考倒。
+    一律把 `rs.SCAN_DIRS` 釘死在這個 tmp_path，跟本機專案資料徹底分開。
+    """
+    monkeypatch.setattr(rs, "SCAN_DIRS", [str(tmp_path)])
     d = tmp_path / name
     d.mkdir()
     (d / "123_456內容.txt").write_text(CONTENT, encoding="utf-8")
@@ -304,35 +312,35 @@ def _stage_dir(tmp_path, name="MWAA1156009438", *, 陳核=False, 公告=False,
     return str(d)
 
 
-def test_pending_archive_when_posted_but_not_archived(tmp_path):
+def test_pending_archive_when_posted_but_not_archived(tmp_path, monkeypatch):
     """陳核跑完、校網貼了、就差存查 —— 這就是番茄卡住的那 13 筆。"""
-    d = _stage_dir(tmp_path, 陳核=True, 公告=True)
+    d = _stage_dir(tmp_path, monkeypatch, 陳核=True, 公告=True)
     row = {"陳會": "OK", "張貼": "OK"}
     assert rs.is_archived(row, d) is False
     assert rs.pending_archive(row, d) is True
 
 
-def test_pending_archive_when_no_announcement_needed(tmp_path):
+def test_pending_archive_when_no_announcement_needed(tmp_path, monkeypatch):
     """不用公告的公文止於存查,沒存查就是待存查。"""
-    d = _stage_dir(tmp_path, 陳核=True, summary=NO_POST_SUMMARY)
+    d = _stage_dir(tmp_path, monkeypatch, 陳核=True, summary=NO_POST_SUMMARY)
     assert rs.pending_archive({"陳會": "OK", "張貼": None}, d) is True
 
 
-def test_pending_archive_false_while_still_waiting_to_post(tmp_path):
+def test_pending_archive_false_while_still_waiting_to_post(tmp_path, monkeypatch):
     """要公告卻還沒貼 —— 缺的是張貼,不是存查,不可以掛「待存查」誤導人。"""
-    d = _stage_dir(tmp_path, 陳核=True)
+    d = _stage_dir(tmp_path, monkeypatch, 陳核=True)
     assert rs.pending_archive({"陳會": "OK", "張貼": "OK"}, d) is False
 
 
-def test_pending_archive_false_before_anything_ran(tmp_path):
+def test_pending_archive_false_before_anything_ran(tmp_path, monkeypatch):
     """剛收進來的新公文不是待存查 —— 否則整張清單每一筆都掛這個標籤,等於沒講。"""
-    d = _stage_dir(tmp_path)
+    d = _stage_dir(tmp_path, monkeypatch)
     assert rs.pending_archive({"陳會": None, "張貼": None}, d) is False
 
 
-def test_pending_archive_false_once_archived(tmp_path):
+def test_pending_archive_false_once_archived(tmp_path, monkeypatch):
     """存查做完就進舊文了,不該還說它待存查。"""
-    d = _stage_dir(tmp_path, 陳核=True, 公告=True, 存查=True)
+    d = _stage_dir(tmp_path, monkeypatch, 陳核=True, 公告=True, 存查=True)
     row = {"陳會": "OK", "張貼": "OK"}
     assert rs.is_archived(row, d) is True
     assert rs.pending_archive(row, d) is False
@@ -341,3 +349,21 @@ def test_pending_archive_false_once_archived(tmp_path):
 def test_pending_archive_false_without_folder(tmp_path):
     """資料夾不在了就查不出缺哪一關,保守不掛標籤。"""
     assert rs.pending_archive({"陳會": "OK", "張貼": "OK"}, None) is False
+
+
+def test_is_archived_when_marker_wiped_by_later_archive(tmp_path, monkeypatch):
+    """先貼過再存查 —— 存查重新解壓資料夾把 *已公告.txt 標記檔沖掉了,不能就此
+    卡在摘要頁走不到舊文。
+
+    2026-09-23 番茄回報:13 筆先陳核＋張貼、後存查的公文，「陳會 OK／張貼 OK」
+    停在摘要頁不動。根因是存查把公文夾重新解壓成「全新」資料夾（已知情況，
+    document_closure_post_web.py 開頭那段註解就是在講這個），資料夾內的
+    *已公告.txt 跟著消失，但貼過的紀錄還在 `post_web_batch` 的清冊
+    （`_已公告清單.csv`）裡。`is_archived` 要問得到清冊，不能只看資料夾。
+    """
+    d = _stage_dir(tmp_path, monkeypatch, 陳核=True, 存查=True)   # 陳核＋存查都有痕跡，唯獨沒有 *已公告.txt
+    monkeypatch.setattr(pwb, "posted_detail",
+                        lambda doc_dir: ("2026-09-16 13:38", "圖書館公告"))
+    row = {"陳會": "OK", "張貼": "OK"}
+    assert rs.is_archived(row, d) is True
+    assert rs.pending_archive(row, d) is False

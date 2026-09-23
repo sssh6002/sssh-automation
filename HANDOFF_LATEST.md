@@ -1,7 +1,7 @@
 # sssh-automation 交接檔
 
 > 每輪覆寫最新狀態。接手者先讀本檔，再看 `git log` 與 `git diff`。
-> 最後更新：2026-09-16
+> 最後更新：2026-09-23
 
 ## 這個 fork 在做什麼
 
@@ -12,7 +12,42 @@
 > 這份代理**沒有期限**，他自己也不知道要代理多久。所以：規則一律寫進規格檔而不是
 > 靠人記，讓整套隨時能交給下一個人；也不要規劃「等代理結束再怎樣」的長線工程。
 
-## 最新一輪（2026-09-16）：摘要全線失敗的排查
+## 最新一輪（2026-09-23）：已貼過的公文又冒出來要貼一次
+
+承辦人回報:`MWAA1156009438`（大數據培訓課程公告）校網上確認已經貼出去了
+（截圖比對過標題、單位、日期都對），**張貼頁卻還在把它列成「會貼上校網」**。
+在重複公告風險發生前先查出來。
+
+**根因:`_already_announced`（原作者那支，`document_closure/` 一行沒改）只翻
+公文夾目前所在工作區根目錄的清冊。** 那份公文 9/16 貼過（清冊留在
+`document_download/_已公告清單.csv`），今天存查把公文夾搬到
+`document_download_closure` 並重新解壓成「全新」資料夾（標記檔 `*已公告.txt`
+跟著消失是已知情況，`document_closure_post_web.py` 開頭那段註解就是在講這個，
+清冊機制正是為了防這個而生）——但 `_already_announced` 判的是**現在**這個資料夾
+所在工作區的清冊，搬過去之後那份清冊是空的，貼過的紀錄還留在舊工作區那份，
+兩邊對不起來，於是又被判成「可以貼」。
+
+`post_web_batch.py` 自己那支 `posted_detail`（給「已經公告過了」那句訊息用的）
+其實**早就會翻全部 `SCAN_DIRS`**，只是這個查全工作區的能力只接在訊息上，
+沒有接進 `evaluate()` 真正的擋下判定——`tests/test_post_web_batch.py` 裡
+`test_why_falls_back_to_ledger_in_another_workspace` 那條測試就只釘了訊息，
+沒釘住這個閘門本身，這次才會漏掉。
+
+**修在 fork 這一側**（照規矩，`document_closure/` 一行沒動）：
+`post_web_batch.evaluate()` 的判定改成
+`_already_announced(d) or any(posted_detail(d))`，兩邊都問過才放行。
+新增回歸測試 `test_already_announced_gate_checks_other_workspaces_too`
+（`tests/test_post_web_batch.py`）複現「貼的時候在 document_download、
+存查後人在 document_download_closure」這個情境，釘住 `plan()` 要擋下、
+不能再列進可貼。全套 720 條測試過。
+
+`document_download_closure/MWAA1156009438` 那個「全新」資料夾（今天存查重新
+解壓出來的，沒有 `*已公告.txt`）**不用手動補標記**——修完之後
+`posted_detail()` 已經能從 `document_download/_已公告清單.csv` 翻到
+2026-09-16 13:38 那一列，張貼頁下次讀清單就會把這筆判成「已經公告過」而不是
+「會貼上校網」。
+
+## 前一輪（2026-09-16）：摘要全線失敗的排查
 
 承辦人早上跑備料，**3 份公文全部摘要失敗**。查出來是**三個各自獨立的問題同一天
 一起浮出來**，不是整套壞掉 —— 這一點值得記住，當天一開始也誤以為是同一件事。

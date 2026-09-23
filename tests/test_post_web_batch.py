@@ -112,6 +112,85 @@ def test_already_announced_is_blocked(env, monkeypatch):
     assert "已經公告過" in blocked[0]["擋下原因"]
 
 
+# ── 擋下來的時候要講得出「什麼時候貼的、貼到哪一板」 ───────────────────────
+#
+# 2026-09-15 番茄看到「已經公告過了」卻在校網首頁找不到那兩則,回頭來問。
+# 實際上有貼成功 —— 他停在首頁預設的「重要消息」分頁,那兩則掛的是圖書館公告。
+# 訊息講得出板名,他自己就能去對,不用回頭一筆一筆問。
+
+MARKER = ("2026-09-14T08:48:55_已公告。\n"
+          "主旨:【活動】測試\n"
+          "公告於:圖書館公告。同步顯示於:硏習資訊+處室公告。\n")
+
+
+def test_why_reads_marker_in_folder(env):
+    """公文夾內有三行格式的 *已公告.txt → 時間與板名都印出來。"""
+    work, _ = env
+    d = _doc(work, "MWAA0001")
+    (d / "29472131_1153097480已公告.txt").write_text(MARKER, encoding="utf-8")
+    assert (pwb.already_announced_why(str(d))
+            == "已經公告過了（2026-09-14 08:48 貼到 圖書館公告）")
+
+
+def test_why_falls_back_to_ledger_in_another_workspace(env, monkeypatch, tmp_path):
+    """結案把公文夾搬走、標記沒跟著搬 —— 清冊仍要翻得到那一列。
+
+    張貼是在收文區做的（標記與清冊都寫在 document_download）,結案後公文夾人在
+    document_download_closure。只翻公文夾自己那一層的話這裡會查不到。
+    """
+    work, _ = env
+    closure = tmp_path / "document_download_closure"
+    closure.mkdir()
+    monkeypatch.setattr(rs, "SCAN_DIRS", [str(work), str(closure)])
+    (work / "_已公告清單.csv").write_text(
+        "公文檔號,時間,主旨,公告於,同步顯示於\n"
+        "MWAA0001,2026-09-14T08:49:17,【競賽】測試,圖書館公告,課外活動+處室公告\n",
+        encoding="utf-8-sig")
+    moved = closure / "MWAA0001"      # 搬過去之後夾內沒有 *已公告.txt
+    moved.mkdir()
+    assert (pwb.already_announced_why(str(moved))
+            == "已經公告過了（2026-09-14 08:49 貼到 圖書館公告）")
+
+
+def test_why_stays_vague_when_there_is_nothing_to_read(env):
+    """人工丟一個空的 *已公告.txt 標「免公告」是允許的用法 —— 解不出來就別瞎掰。"""
+    work, _ = env
+    d = _doc(work, "MWAA0001")
+    (d / "免公告已公告.txt").write_text("", encoding="utf-8")
+    why = pwb.already_announced_why(str(d))
+    assert why.startswith("已經公告過了（資料夾有")
+    assert "2026" not in why
+
+
+def test_already_announced_gate_checks_other_workspaces_too(env, monkeypatch, tmp_path):
+    """公文貼過之後被存查搬到 document_download_closure，張貼頁不能再把它排回可貼。
+
+    2026-09-23 番茄實測 `MWAA1156009438`:校網上確認已經貼出去了，張貼頁卻還在
+    顯示「會貼上校網」。根因是 `_already_announced`（原作者那支）只翻公文夾
+    **目前**所在工作區根目錄的清冊 —— 存查把公文夾搬到 document_download_closure、
+    重新解壓成全新資料夾（標記檔消失是已知情況），但清冊那一列還留在舊的
+    document_download，`plan()` 因此判定「可以貼」，有重複公告的風險。
+    """
+    from document_closure import document_closure_post_web as pw
+    work, sheet = env
+    closure = tmp_path / "document_download_closure"
+    closure.mkdir()
+    monkeypatch.setattr(rs, "SCAN_DIRS", [str(work), str(closure)])
+    monkeypatch.setattr(pwb, "_doc_dir",
+                        lambda no: str(closure / no) if (closure / no).is_dir() else None)
+    (work / "_已公告清單.csv").write_text(
+        "公文檔號,時間,主旨,公告於,同步顯示於\n"
+        "MWAA0001,2026-09-16T13:38:12,【培訓】測試,圖書館公告,課外活動+處室公告\n",
+        encoding="utf-8-sig")
+    moved = closure / "MWAA0001"      # 存查重新解壓的「全新」資料夾，沒有 *已公告.txt
+    moved.mkdir()
+    monkeypatch.setattr(pw, "_already_announced", lambda d: False)  # 目前工作區的清冊是空的
+    rs.upsert({"文號": "MWAA0001", "公告": TEXT, "張貼": "OK"}, path=sheet)
+    ready, blocked, _, _ = pwb.plan(sheet)
+    assert ready == []
+    assert "已經公告過" in blocked[0]["擋下原因"]
+
+
 def test_missing_publish_unit_warns(env, monkeypatch):
     """env.env 缺 sssh_publish_unit → 先警告，不要讓人按下去才在發佈那步停住。"""
     import taipeion_login_selenium as tls
