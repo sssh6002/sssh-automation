@@ -903,10 +903,18 @@ function archItem(it, i, kind) {
            真的歸檔成功時程式會重新寫一份，所以刪錯不會永久失去什麼。</span>
        </div>`
     : "";
+  // 卡住的公文常常得去資料夾裡補檔（總結.md／內容.txt）才解得開，之前要切回
+  // 摘要頁才找得到「開資料夾」——這裡直接給，不用切頁。只有真的有資料夾可開
+  // 才顯示；「ask」是最後核對用的靜態清單，不需要這顆。
+  const folder = (it.目錄 && kind !== "ask")
+    ? `<div class="foot" style="margin-top:6px">
+         <button data-openarch="${esc(it.目錄)}">開資料夾</button>
+       </div>`
+    : "";
   return `<div class="si ${cls}">
     <div class="sh"><span class="idx">${i}.</span>
       <span class="no">${esc(it.文號)}</span>${kind === "ask" ? "" : tag}
-      <span class="su">${esc(it.主旨) || "（讀不到主旨）"}</span></div>${body}${fix}</div>`;
+      <span class="su">${esc(it.主旨) || "（讀不到主旨）"}</span></div>${body}${fix}${folder}</div>`;
 }
 
 // 上一批歸檔的結果。**做完了一定要留下痕跡**:歸檔一按下去待結案清單就作廢，
@@ -1011,6 +1019,19 @@ function drawArch() {
   el("rescan").onclick = startScan;
   [...document.querySelectorAll("[data-unmark]")].forEach(b =>
     b.onclick = () => unmark(b));
+  [...document.querySelectorAll("[data-openarch]")].forEach(b =>
+    b.onclick = async () => {
+      const orig = b.textContent;
+      b.disabled = true; b.textContent = "開啟中…";
+      try {
+        const j = await (await fetch("/api/open-folder", {
+          method: "POST", body: JSON.stringify({ 目錄: b.dataset.openarch })
+        })).json();
+        b.textContent = j.ok ? "已開啟" : "開不起來";
+        if (!j.ok) say(j.錯誤, "err");
+      } catch (e) { b.textContent = "開不起來"; say("開不起來：" + e, "err"); }
+      setTimeout(() => { b.textContent = orig; b.disabled = false; }, 2000);
+    });
   // 上面那顆與底下那顆是同一個動作,狀態要一起走。
   const top = el("doarchtop");
   top.hidden = false;

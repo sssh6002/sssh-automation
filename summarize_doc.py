@@ -118,6 +118,55 @@ _SCAN_MARKER_TEXT = """紙本轉線上公文,需手動處理。
 附件才辦得了 —— 請自行處理,不要等系統摘要。
 """
 
+# 個資 / 紙本轉線上這兩種都是「AI 永久不能處理,得靠人補」的情況 —— 跟 LLM
+# backend 全滅那種暫時性失敗不同(暫時性失敗不留檔,讓下次自動重跑)。
+# 不留下 *內容.txt / *總結.*.md 的話,兩個下游都會看起來像「程式壞掉」:
+# review_sheet.collect() 讀不到主旨(摘要頁「讀不到主旨」)、
+# archive_batch.read_category() 讀不到 #存查分類(存查頁「找不到總結檔的
+# #存查分類 那一行 —— 先補跑摘要」,而這裡補跑摘要不會有用,永遠卡在同一句)。
+# 所以兩處都補一組空白骨架,承辦人照 summarize_doc.md 的格式填字就好,不用從零
+# 手刻檔案;分類值特意留白(冒號後面不放任何字),archive_batch 的
+# `#\s*存查分類\s*[:：]\s*(\S+)` 不會誤吃到骨架,填完之前繼續正確地說「找不到」。
+_MANUAL_CONTENT_SKELETON = (
+    "發文日期：\n"
+    "發文字號：\n"
+    "主旨：\n"
+    "說明：\n"
+    "附件：\n"
+)
+_MANUAL_SUMMARY_SKELETON = (
+    "#存查分類:\n"
+    "##\n"
+    "###\n"
+    "####\n"
+    "\n"
+    "發文日期：\n"
+    "發文字號：\n"
+    "主旨：\n"
+)
+
+
+def _write_manual_skeleton(doc_dir, stem, reason):
+    """補一組空白的 *內容.txt / *總結.<model>.md,交承辦人手動填寫。
+
+    只補「目錄裡兩個都還沒有」的那個 —— 已經有(不管是骨架還是 LLM 真的產出的)
+    就不動,骨架不能蓋掉任何人已經填好的字。回實際寫出的檔名列表(可能是空的)。
+    """
+    written = []
+    if not list(doc_dir.glob("*內容.txt")):
+        p = doc_dir / f"{stem}內容.txt"
+        p.write_text(_MANUAL_CONTENT_SKELETON, encoding="utf-8")
+        written.append(p.name)
+    if not list(doc_dir.glob("*總結.*.md")):
+        p = doc_dir / f"{stem}總結.待填寫.md"
+        p.write_text(_MANUAL_SUMMARY_SKELETON, encoding="utf-8")
+        written.append(p.name)
+    if written:
+        print(f"      [骨架] {reason} → 已產生空白待填檔:{'、'.join(written)}")
+        print("          請照 summarize_doc.md 的格式手動填寫(分類/檔號對照表在"
+              "該檔),填完存查頁才讀得到 #存查分類。")
+    return written
+
 # LLM(尤其 gemini-flash 類)對「輸出格式」的遵從是機率性的,偶爾會吐出 agentic
 # 前綴(如 update_topic{...})或漏宣告檔名,導致 _parse_response 解析失敗。這類失敗
 # 重試通常就能拿到正常回應。每個目錄最多嘗試 _SUMMARIZE_MAX_ATTEMPTS 次(= 首次
@@ -734,6 +783,7 @@ def summarize_doc(doc_dir):
             encoding="utf-8")
         print("      [跳過] 主檔抽不到文字層(掃描影像)→ 紙本轉線上,需手動處理")
         print(f"          {detail}(門檻 {_MIN_MAIN_PDF_CHARS} 字)→ {marker.name}")
+        _write_manual_skeleton(doc_dir, stem, "紙本轉線上,抽不到文字層")
         return None
     print(f"      抽到 {len(pdf_texts)} 份 PDF 文字:{list(pdf_texts.keys())}")
 
@@ -742,11 +792,13 @@ def summarize_doc(doc_dir):
     findings = scan_pii("\n".join(pdf_texts.values()), inventory)
     if findings:
         report = pii_report(findings)
-        marker = doc_dir / f"{sorted(pdf_texts)[0].rsplit('.', 1)[0]}含個資.txt"
+        stem = sorted(pdf_texts)[0].rsplit('.', 1)[0]
+        marker = doc_dir / f"{stem}含個資.txt"
         marker.write_text(report, encoding="utf-8")
         print(f"      [擋下] 偵測到個資,未送 AI → {marker.name}")
         for label, hit, _ in findings:
             print(f"          {label}:{hit}")
+        _write_manual_skeleton(doc_dir, stem, "含個資,未送 AI")
         return None
 
     prompt = _build_prompt(spec_md_text, inventory, pdf_texts)

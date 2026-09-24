@@ -442,3 +442,69 @@ def test_no_main_pdf_at_all_is_not_marked_as_paper(tmp_path, monkeypatch):
 
     assert sd.summarize_doc(d) is None
     assert list(d.glob("*紙本轉線上需手動處理.txt")) == []
+
+
+# ───────────────── 個資擋下 / 紙本轉線上:補空白骨架供手動填寫 ─────────────────
+# 這兩種都是「AI 永久不能處理」,跟 LLM backend 全滅那種暫時性失敗不同 —— 不留檔
+# 的話,摘要頁「讀不到主旨」、存查頁「找不到 #存查分類」都會看起來像程式壞掉,
+# 而「先補跑摘要」這個建議對這兩種永遠沒用。補一組空白骨架讓承辦人照
+# summarize_doc.md 的格式填字,不用從零手刻檔案。
+
+def test_scanned_doc_gets_manual_skeleton(tmp_path, monkeypatch):
+    d = _make_doc_dir(tmp_path)
+    monkeypatch.setattr(sd, "_pdf_to_text", lambda p: "")
+    monkeypatch.setattr(sd, "_call_backends", lambda prompt: pytest.fail("掃描件不可以送 LLM"))
+
+    assert sd.summarize_doc(d) is None
+    content = list(d.glob("*內容.txt"))
+    summary = list(d.glob("*總結.*.md"))
+    assert len(content) == 1 and len(summary) == 1
+    assert "主旨：" in content[0].read_text(encoding="utf-8")
+    body = summary[0].read_text(encoding="utf-8")
+    assert body.startswith("#存查分類:\n"), "分類值要留白,不能讓 archive_batch 誤判成已分類"
+
+
+def test_pii_hit_gets_manual_skeleton_not_sent_to_llm(tmp_path, monkeypatch):
+    d = _make_doc_dir(tmp_path)
+    monkeypatch.setattr(sd, "_pdf_to_text", lambda p: "檢送本會辦理研習資訊一案,請查照。" * 20)
+    monkeypatch.setattr(sd, "_call_backends", lambda prompt: pytest.fail("含個資不可以送 LLM"))
+    monkeypatch.setattr(
+        "content_guard.scan_pii",
+        lambda text, filenames=None: [("手機號碼", "0912345678", "個人行動電話")])
+
+    assert sd.summarize_doc(d) is None
+    assert len(list(d.glob("*含個資.txt"))) == 1
+    content = list(d.glob("*內容.txt"))
+    summary = list(d.glob("*總結.*.md"))
+    assert len(content) == 1 and len(summary) == 1
+    assert content[0].read_text(encoding="utf-8") == sd._MANUAL_CONTENT_SKELETON
+    assert summary[0].read_text(encoding="utf-8") == sd._MANUAL_SUMMARY_SKELETON
+
+
+def test_manual_skeleton_does_not_overwrite_filled_in_files(tmp_path, monkeypatch):
+    """承辦人已經手動填過其中一個檔 —— 骨架不能把填好的字蓋掉,只補還沒有的那個。"""
+    d = _make_doc_dir(tmp_path)
+    monkeypatch.setattr(sd, "_pdf_to_text", lambda p: "")
+    monkeypatch.setattr(sd, "_call_backends", lambda prompt: pytest.fail("掃描件不可以送 LLM"))
+    filled = d / "29391312_11530938061內容.txt"
+    filled.write_text("發文日期：中華民國115年9月1日\n主旨：（已經填好了）\n", encoding="utf-8")
+
+    assert sd.summarize_doc(d) is None
+    assert filled.read_text(encoding="utf-8") == (
+        "發文日期：中華民國115年9月1日\n主旨：（已經填好了）\n"), "已填的內容.txt 不能被骨架蓋掉"
+    summary = list(d.glob("*總結.*.md"))
+    assert len(summary) == 1, "總結.md 還沒有,骨架要補這個"
+
+
+def test_rerun_after_skeleton_written_skips_llm_entirely(tmp_path, monkeypatch):
+    """骨架寫過之後,兩個輸出檔都「存在」了 —— 下次重跑要落進頂端的「兩個都有,
+    完全略過」預檢,不會再重新掃描 PDF / 再判一次個資,更不會叫 LLM。"""
+    d = _make_doc_dir(tmp_path)
+    monkeypatch.setattr(sd, "_pdf_to_text", lambda p: "")
+    monkeypatch.setattr(sd, "_call_backends", lambda prompt: pytest.fail("不該被叫到"))
+    assert sd.summarize_doc(d) is None
+
+    monkeypatch.setattr(sd, "_pdf_to_text", lambda p: pytest.fail("不該再抽字"))
+    assert sd.summarize_doc(d) is None
+    assert len(list(d.glob("*內容.txt"))) == 1
+    assert len(list(d.glob("*總結.*.md"))) == 1

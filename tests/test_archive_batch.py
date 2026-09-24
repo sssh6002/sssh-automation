@@ -73,6 +73,37 @@ def test_sidebar_fallback_only_kicks_in_when_original_fails(monkeypatch):
         ds._get_sidebar_paren_count = original
 
 
+def test_lenient_first_click_swaps_and_restores():
+    """區塊內換成 `list_pager.click_first_document_in_pending`，出區塊還原。
+
+    2026-09-24 番茄回報「重複來文無法歸檔」：待結案清單只剩一筆「疑似重複來文」
+    問號圖示的公文，原版點擊邏輯的完全比對會判定「找不到」，
+    `process_document_closure` 連第一步都做不到。
+    """
+    import document_system as ds
+    import list_pager as lp
+    original = ds._click_first_document_in_pending
+    try:
+        with ab.lenient_first_click():
+            assert ds._click_first_document_in_pending is lp.click_first_document_in_pending
+        assert ds._click_first_document_in_pending is original
+    finally:
+        ds._click_first_document_in_pending = original
+
+
+def test_lenient_first_click_restores_even_on_exception():
+    """區塊內出例外也要還原——不然下一輪存查會靜靜地一直用著替換版本。"""
+    import document_system as ds
+    original = ds._click_first_document_in_pending
+    try:
+        with pytest.raises(RuntimeError):
+            with ab.lenient_first_click():
+                raise RuntimeError("測試用例外")
+        assert ds._click_first_document_in_pending is original
+    finally:
+        ds._click_first_document_in_pending = original
+
+
 # ── 檔號判定 ───────────────────────────────────────────────────────────────
 
 @pytest.fixture
@@ -146,6 +177,38 @@ def test_preview_splits_ready_and_blocked(work):
     ready, blocked = ab.preview(["MWAA0001", "MWAA0002"])
     assert [i["文號"] for i in ready] == ["MWAA0001"]
     assert [i["文號"] for i in blocked] == ["MWAA0002"]
+
+
+# ── 資料夾路徑（存查頁「開資料夾」按鈕要用） ─────────────────────────────────
+
+def test_doc_folder_prefers_closure_dir(work):
+    """跟 read_category 同一個優先序:結案目錄有就用結案目錄。"""
+    closure_d = _closure_doc(work, "MWAA0007", "#存查分類:研習 03750401\n")
+    _closure_doc(work, "MWAA0007", "#存查分類:研習 03750401\n", base="document_download")
+    assert ab.doc_folder("MWAA0007") == str(closure_d)
+
+
+def test_doc_folder_falls_back_to_pending_dir(work):
+    d = _closure_doc(work, "MWAA0008", "#存查分類:研習 03750401\n", base="document_download")
+    assert ab.doc_folder("MWAA0008") == str(d)
+
+
+def test_doc_folder_none_when_neither_exists(work):
+    assert ab.doc_folder("MWAA0009") is None
+
+
+def test_evaluate_carries_folder_for_blocked_items(work):
+    """卡住的公文一樣要帶資料夾路徑 —— 停在這裡的才最需要「開資料夾」補檔。"""
+    d = (work / "document_download_closure" / "MWAA0010")
+    d.mkdir(parents=True)
+    it = ab.evaluate("MWAA0010")
+    assert it.get("擋下原因")
+    assert it["目錄"] == str(d)
+
+
+def test_evaluate_folder_none_without_any_dir(work):
+    it = ab.evaluate("MWAA0011")
+    assert it["目錄"] is None
 
 
 # ── 順序:整批做到哪裡 ──────────────────────────────────────────────────────

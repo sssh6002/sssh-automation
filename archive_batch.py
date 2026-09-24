@@ -300,6 +300,36 @@ def install_sidebar_fallback():
     return original
 
 
+@contextlib.contextmanager
+def lenient_first_click():
+    """讓 `process_document_closure` 點「待結案」最上方那一筆時，能容忍 edoc
+    把「疑似重複來文」問號圖示跟公文號擠在同一個可點元素裡。
+
+    2026-09-24 番茄回報「重複來文無法歸檔」：`MWAA1156009654` 待結案清單上
+    「公文文號」欄長得跟正常列不一樣，多了一個問號圖示，textContent 變成
+    「?MWAA1156009654」。原版 `document_system._click_first_document_in_pending`
+    三個策略都要求整段文字**完全等於**公文號格式，前面多一個「?」就整段比對
+    不過，`_process_one_pending_closure_doc` 連第一步「點最上方公文」都做不到，
+    直接印「點待結案公文失敗，請手動處理」——跟 2026-09-23 那次「問號圖示」
+    是同一個病，這次踩在存查這條路（見 `list_pager.click_first_document_in_pending`
+    docstring 那段記錄）。
+
+    只換 `document_system._click_first_document_in_pending` 這一個模組屬性、
+    try/finally 還原——`document_system.py`／`document_closure/` 一行沒改。
+    `_process_one_pending_closure_doc` 呼叫的是
+    `from document_system import _click_first_document_in_pending`，
+    這是**函式內**的 import，每輪呼叫都會重新查一次模組屬性，換掉就會生效。
+    """
+    import document_system as ds
+    import list_pager as lp
+    real = ds._click_first_document_in_pending
+    ds._click_first_document_in_pending = lp.click_first_document_in_pending
+    try:
+        yield
+    finally:
+        ds._click_first_document_in_pending = real
+
+
 # ── 預覽 ───────────────────────────────────────────────────────────────────
 
 def read_category(doc_no):
@@ -350,11 +380,25 @@ def read_subject(doc_no):
     return ""
 
 
+def doc_folder(doc_no):
+    """這份公文在磁碟上的資料夾 —— 存查頁「開資料夾」要用。
+
+    跟 read_category／read_subject 同一個優先序：結案目錄有就用結案目錄，
+    沒有才退回承辦中目錄。兩邊都沒有回 None，讓呼叫端分得出「有資料夾」跟
+    「根本沒有資料夾可開」。
+    """
+    for base in ("document_download_closure", "document_download"):
+        d = os.path.join(_BASE_DIR, base, doc_no)
+        if os.path.isdir(d):
+            return d
+    return None
+
+
 def evaluate(doc_no):
     """單筆能不能歸檔。回 dict —— 不能的帶「擋下原因」。"""
     cat, num, src = read_category(doc_no)
     item = {"文號": doc_no, "分類": cat or "", "檔號": num or "", "來源": src or "",
-            "已存查標記": False}
+            "已存查標記": False, "目錄": doc_folder(doc_no)}
     closure_dir = os.path.join(_BASE_DIR, "document_download_closure", doc_no)
     marks = [n for n in (os.listdir(closure_dir) if os.path.isdir(closure_dir) else [])
              if n.endswith(MARKER_SUFFIX)]
@@ -629,7 +673,9 @@ def main():
     disable_auto_post()
     from document_closure.document_closure import process_document_closure
     # 2026-08 版更:每一筆按「確定存檔」之前要先點【附件歸檔】，見上面那段。
-    with attachment_archive_first():
+    # 2026-09-24 版更:待結案清單只剩「疑似重複來文」問號圖示那一筆時，原版
+    # 點擊邏輯會判定「找不到」，見 lenient_first_click 說明。
+    with attachment_archive_first(), lenient_first_click():
         ok = process_document_closure(driver)
     print(f"\n===== 結案存查流程{'完成' if ok else '中止'} =====")
     if not ok:

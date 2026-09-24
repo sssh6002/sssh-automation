@@ -43,6 +43,53 @@ def test_download_only_restores_even_on_error():
     assert sd.summarize_extracted is real
 
 
+def test_lenient_doc_click_swaps_and_restores():
+    import document_system as ds
+    real = ds._click_doc_by_no
+    with pb.lenient_doc_click():
+        assert ds._click_doc_by_no is not real
+    assert ds._click_doc_by_no is real
+
+
+def test_lenient_doc_click_restores_even_on_error():
+    import document_system as ds
+    real = ds._click_doc_by_no
+    with pytest.raises(RuntimeError):
+        with pb.lenient_doc_click():
+            raise RuntimeError("下載中斷")
+    assert ds._click_doc_by_no is real
+
+
+def test_lenient_doc_click_calls_execute_script_and_reports_result():
+    """換上去的版本行為要跟原版同一個形狀：呼叫 execute_script、回傳布林值、
+    例外要吞掉不能讓整批備料炸掉——只是判斷式從「完全相等」放寬成「含有」，
+    這件事本身在 JS 裡，Python 測試只能釘住外層的呼叫合約。
+    """
+    import document_system as ds
+
+    class FakeDriver:
+        def __init__(self, result):
+            self.result = result
+            self.calls = []
+
+        def execute_script(self, script, *args):
+            self.calls.append(args)
+            if isinstance(self.result, Exception):
+                raise self.result
+            return self.result
+
+    with pb.lenient_doc_click():
+        d = FakeDriver(True)
+        assert ds._click_doc_by_no(d, "MWAA1156009654") is True
+        assert d.calls == [("MWAA1156009654",)]
+
+        d2 = FakeDriver(False)
+        assert ds._click_doc_by_no(d2, "MWAA1156009654") is False
+
+        d3 = FakeDriver(RuntimeError("壞了"))
+        assert ds._click_doc_by_no(d3, "MWAA1156009654") is False
+
+
 def test_noop_summarize_really_does_nothing(tmp_path, monkeypatch):
     """假摘要不可以偷偷叫 LLM。"""
     def boom(*a, **k):

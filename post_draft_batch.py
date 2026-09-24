@@ -30,6 +30,7 @@ if _BASE_DIR not in sys.path:
     sys.path.insert(0, _BASE_DIR)
 
 import review_sheet as rs  # noqa: E402
+import archive_batch as ab  # noqa: E402
 
 GATE = "陳會"
 MARKER_SUFFIX = "已陳核.txt"
@@ -125,11 +126,27 @@ def marker_path(extract_dir, doc_no):
 
 
 def already_sent(extract_dir, doc_no):
-    """該目錄內出現任何 *已陳核.txt → 視為已送簽，不重送。"""
+    """該目錄內出現 *已陳核.txt 或 *已存查.txt → 視為已經送過陳核，不重送。
+
+    已存查.txt 那個分支是必要的：公文歸檔到結案目錄之後，承辦中目錄會被系統
+    刪掉，而 `document_closure._copy_meta_files_from_pending` 只複製
+    `*總結*.md` / `*內容.txt` 到結案目錄，**不複製 已陳核.txt** —— 於是已經
+    存查完成的公文，結案目錄裡反而只剩 已存查.txt，已陳核.txt 那個痕跡隨著
+    被刪掉的承辦中目錄一起消失了。
+
+    這裡不能只靠 `rs.is_archived()`（那支還要求「公告也settled」才算數，是給
+    摘要頁判斷「能不能移進舊文」用的兩段式標準）—— 陳核只要送過一次，不管
+    後面公告貼了沒，都不該再送第二次。只認舊的 已陳核.txt 標記，會讓已經存查
+    完成、但還沒貼校網的公文被誤判成「還沒送過」，再送一次會在 edoc 對同一份
+    公文多開一輪簽核流程（2026-09-23 實測 MWAA1156009438 就是這樣被排進
+    「會送」清單，跑到清單裡撈不到人才發現）。
+    """
     try:
-        return any(n.endswith(MARKER_SUFFIX) for n in os.listdir(extract_dir))
+        names = os.listdir(extract_dir)
     except OSError:
         return False
+    return any(n.endswith(MARKER_SUFFIX) or n.endswith(ab.MARKER_SUFFIX)
+               for n in names)
 
 
 _RETURNED_RE = re.compile(r"^\s*\d+\.松山高中.*?\s退文\s", re.M)
@@ -501,7 +518,12 @@ def close_viewer(driver, doc_no):
 
 def run(ready, driver):
     """逐筆送陳核。任一筆失敗即中止，回 (成功數, 失敗的那筆 or None)。"""
-    from document_system import _click_doc_by_no
+    # 這裡不用 document_system._click_doc_by_no（要求元素文字完全等於文號）——
+    # edoc 有些列會把圖示跟文號擠在同一個可點元素裡（例如「疑似重複來文」的
+    # 問號圖示），完全比對會判定「找不到」（2026-09-23 實測 MWAA1156009654，
+    # 跟 prep_batch.lenient_doc_click 同一個病根）。改用 fork 側「文字含有
+    # 文號即可」的版本，兩邊共用同一支，不要各寫一份幾乎一樣的 JS。
+    from list_pager import click_doc_by_no as _click_doc_by_no
     from fill_in_draft import fill_in_draft
 
     if not focus_main_window(driver):

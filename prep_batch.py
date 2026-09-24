@@ -155,6 +155,36 @@ def download_only():
         summarize_doc.summarize_extracted = real
 
 
+@contextlib.contextmanager
+def lenient_doc_click():
+    """點清單裡的公文連結時，只要求元素文字「含有」公文號，不要求完全相等。
+
+    原版 `document_system._click_doc_by_no` 要求可點元素的 textContent
+    **完全等於**公文號，才會被當成那一列的連結去點。但 edoc 有些列會把一個
+    圖示跟公文號擠在同一個可點元素裡（例如「疑似重複來文」的問號圖示），
+    那個元素的 textContent 變成「?MWAA1156009654」，跟 `=== doc_no` 對不
+    起來，於是印「清單內找不到可點的公文」，備料在下載這一步就卡死 ——
+    這一格連文號都讀不到就整批放棄是 list_pager 那邊的坑（見那邊的
+    `_COLLECT_JS`），讀得到文號、卻點不下去是這裡的坑，同一天各自浮出來
+    （2026-09-23 實測 MWAA1156009654）。
+
+    只換 `document_system._click_doc_by_no` 這一個模組屬性、try/finally
+    還原 —— `document_system.py` 一行沒改，原作者自己跑 `main.py 4` 不受
+    影響（那支呼叫 `_click_doc_by_no(...)` 是模組內的裸名稱呼叫，每次都會
+    重新查一次模組的全域名稱空間，換掉屬性就會生效，不需要另外包一層
+    函式內 import）。實際判斷邏輯跟 `post_draft_batch.py` 共用同一支
+    `list_pager.click_doc_by_no`，不要各寫一份幾乎一樣的 JS。
+    """
+    import document_system as ds
+    import list_pager as lp
+    real = ds._click_doc_by_no
+    ds._click_doc_by_no = lp.click_doc_by_no
+    try:
+        yield
+    finally:
+        ds._click_doc_by_no = real
+
+
 def pending_summaries(dirs=None):
     """已經下載、但還沒有總結的公文目錄（**包含歷史的**）。"""
     return [d for d in rs.iter_doc_dirs(dirs or WORK_DIRS)
@@ -566,7 +596,7 @@ def download_stage(attach=False):
     print("[prep_batch] OK:已停在主畫面，開始下載。")
 
     # 中文安裝路徑那道也一起裝上 —— 見上面那段（同事 2026-08-14 踩到）。
-    with download_only(), unicode_safe_dialog_path():
+    with download_only(), unicode_safe_dialog_path(), lenient_doc_click():
         ok = process_document_prep(driver)
     return driver, bool(ok)
 

@@ -116,11 +116,18 @@ def test_blocks_when_already_sent(env):
 
 
 def test_blocks_when_already_archived(env):
-    """已存查（辦完了）卻還留著「陳會 OK」→ 不可以再送一次。
+    """已存查（辦完了），但公告／張貼那一側還沒完成 —— 一樣不可以重送陳核。
 
-    2026-08-04 實測承辦人的審核表:MWAA1156006895、MWAA1156007057 已存查、
-    甚至已公告，「陳會」欄仍是 OK —— upsert 只填空白格，當初打的 OK 做完後
-    不會被改寫（交接檔坑 #1）。少了這條，這些結案的公文每次都算「可送」。
+    2026-09-23 實測:承辦人一批 10 筆陳核，裡面有幾筆早就存查完成，卻因為
+    「張貼」欄還是 OK（校網還沒貼）被排進「會送」清單，實際跑下去在 edoc 找
+    不到「承辦中」清單裡的那一筆才發現（MWAA1156009438）。
+
+    根因:原本這裡靠 `rs.is_archived()` 擋，但那支要求「已存查 **且** 公告
+    那側也 settled」才算數 —— 那是給摘要頁判斷「能不能移進舊文」的兩段式
+    標準，不是這裡要問的問題。公文一旦存查（結案），陳核這關就一定已經過
+    了，跟公告貼了沒完全無關；拿 is_archived() 當「還要不要送陳核」的判準，
+    會讓「已存查、還沒貼校網」的公文卡在這個縫裡被重送。`already_sent()`
+    現在直接認 已存查.txt 這個標記，不理會公告狀態，在更前面就擋下來。
     """
     work, sheet = env
     d = _doc(work, "MWAA0001")
@@ -129,7 +136,7 @@ def test_blocks_when_already_archived(env):
               path=sheet)
     ready, blocked = pdb.plan(sheet)
     assert ready == []
-    assert "已經辦完" in blocked[0]["擋下原因"]
+    assert "先前送過" in blocked[0]["擋下原因"]
 
 
 def test_evaluate_matches_plan(env):

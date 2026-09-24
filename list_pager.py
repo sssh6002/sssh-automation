@@ -60,7 +60,12 @@ _CHANGE_TIMEOUT = 8.0
 # 找含「公文文號」的 th → 算出它是第幾欄 → 把同一欄的 td 全撈出來。
 
 _COLLECT_JS = r"""
-    var pat = /^[A-Z][A-Z0-9]*\d{4,}$/;
+    // 不要求整格文字「完全等於」文號格式 —— 有些列會在文號前面多帶一個圖示
+    // （例如 edoc 標「疑似重複來文」的問號圖示，跟文號擠在同一格），這種列
+    // 整格 textContent 是「?MWAA1156009654」，只要格子裡「含有」符合格式的
+    // 文號就抓出來，不因為多一個圖示字元就整筆漏掉（2026-09-23 實測
+    // MWAA1156009654：這一筆是清單裡唯一一筆，抓不到文號等於整批收文直接放棄）。
+    var pat = /[A-Z][A-Z0-9]*\d{4,}/;
     var out = [];
     var ths = document.querySelectorAll('th');
     for (var i = 0; i < ths.length; i++) {
@@ -78,8 +83,8 @@ _COLLECT_JS = r"""
         for (var k = 0; k < rows.length; k++) {
             var cells = rows[k].children;
             if (idx >= cells.length) continue;
-            var t = (cells[idx].textContent || '').trim();
-            if (pat.test(t) && out.indexOf(t) === -1) out.push(t);
+            var m = pat.exec((cells[idx].textContent || '').trim());
+            if (m && out.indexOf(m[0]) === -1) out.push(m[0]);
         }
         break;
     }
@@ -117,7 +122,9 @@ def is_paper(doc_no):
 # 同一次掃描順便撈「簽核」欄。找不到那個表頭(欄位改名/別張清單)時 idxSign = -1,
 # 公文號照樣讀得到 —— 記不到簽核別只是少了原因提示,不能讓它害整個備料讀不到清單。
 _COLLECT_SIGN_JS = r"""
-    var pat = /^[A-Z][A-Z0-9]*\d{4,}$/;
+    // 同 _COLLECT_JS：只要求格子裡「含有」符合格式的文號，不要求整格文字
+    // 完全等於（見上面那支的註解）。
+    var pat = /[A-Z][A-Z0-9]*\d{4,}/;
     var out = [];
     var ths = document.querySelectorAll('th');
     for (var i = 0; i < ths.length; i++) {
@@ -138,8 +145,9 @@ _COLLECT_SIGN_JS = r"""
         for (var k = 0; k < rows.length; k++) {
             var cells = rows[k].children;
             if (idx >= cells.length) continue;
-            var t = (cells[idx].textContent || '').trim();
-            if (!pat.test(t) || seen[t]) continue;
+            var m = pat.exec((cells[idx].textContent || '').trim());
+            if (!m || seen[m[0]]) continue;
+            var t = m[0];
             seen[t] = 1;
             var sign = '';
             if (idxSign !== -1 && idxSign < cells.length) {
@@ -188,6 +196,167 @@ def page_doc_nos(driver):
     except Exception as e:
         print(f"[pager] 讀公文號失敗:{type(e).__name__}: {e}")
         return []
+
+
+# ── 點清單裡某一筆公文的連結 ────────────────────────────────────────────────
+
+_CLICK_JS = r"""
+    var target = arguments[0];
+    var all = document.querySelectorAll('a, span, td, div, input, button');
+    for (var i = 0; i < all.length; i++) {
+        var el = all[i];
+        if (el.offsetParent === null) continue;
+        var text = (el.tagName === 'INPUT' ? (el.value || '') : (el.textContent || '')).trim();
+        if (text.indexOf(target) === -1) continue;
+        var kids = el.querySelectorAll('*');
+        var hasSameTextChild = false;
+        for (var k = 0; k < kids.length; k++) {
+            var ct = (kids[k].textContent || kids[k].value || '').trim();
+            if (ct.indexOf(target) !== -1) { hasSameTextChild = true; break; }
+        }
+        if (hasSameTextChild) continue;
+        el.scrollIntoView({block:'center'});
+        el.click();
+        return true;
+    }
+    return false;
+"""
+
+
+def click_doc_by_no(driver, doc_no):
+    """點目前清單 frame 內指定公文號那一列的連結（葉節點優先，避免點到整列
+    的外層容器）。
+
+    跟原作者 `document_system._click_doc_by_no` 同一招，差別只在比對條件從
+    「元素文字完全等於公文號」放寬成「元素文字含有公文號」——edoc 有些列會
+    把一個圖示跟公文號擠在同一個可點元素裡（例如「疑似重複來文」的問號圖示，
+    textContent 變成「?MWAA1156009654」），原版的完全比對會判定「找不到」，
+    備料、送陳核都會卡在這一步（2026-09-23 實測 MWAA1156009654：先在
+    `_COLLECT_JS`/`_COLLECT_SIGN_JS` 那關讀不到文號，補了「含有」比對之後，
+    下一關點擊這裡又用同一套「完全等於」卡住，兩個地方是同一個病根）。
+
+    這是 fork 側獨立的一份，不改 `document_system.py`：`prep_batch.py` 那條
+    路把它換進 `document_system` 的模組屬性（見 `prep_batch.lenient_doc_click`），
+    `post_draft_batch.py` 直接呼叫這支，兩邊共用同一套判斷，不用各自維護
+    一份幾乎一樣的 JS。
+    """
+    try:
+        ok = driver.execute_script(_CLICK_JS, doc_no)
+        print(f"      {'OK:點到' if ok else 'x  清單內找不到可點的'}公文「{doc_no}」")
+        return bool(ok)
+    except Exception as e:
+        print(f"      x  點公文「{doc_no}」失敗:{type(e).__name__}: {e}")
+        return False
+
+
+# ── click_first_document_in_pending（存查/歸檔專用，不知道要點哪個文號）───
+
+_FIRST_PENDING_DOC_JS = r"""
+    var pat = /[A-Z][A-Z0-9]*\d{4,}/;
+    // S1：<a> 文字含公文號
+    var anchors = document.querySelectorAll('a');
+    for (var i = 0; i < anchors.length; i++) {
+        var a = anchors[i];
+        if (a.offsetParent === null) continue;
+        var m = pat.exec((a.textContent || '').trim());
+        if (m) return {el: a, docNo: m[0]};
+    }
+    // S2：任何可見葉節點文字含公文號（避免點到整列容器）
+    var all = document.querySelectorAll('a, span, td, div, input, button');
+    for (var i = 0; i < all.length; i++) {
+        var el = all[i];
+        if (el.offsetParent === null) continue;
+        var text = (el.tagName === 'INPUT' ? (el.value || '') : (el.textContent || '')).trim();
+        var m = pat.exec(text);
+        if (!m) continue;
+        var hasSameMatchChild = false;
+        var kids = el.querySelectorAll('*');
+        for (var k = 0; k < kids.length; k++) {
+            var ct = (kids[k].textContent || kids[k].value || '').trim();
+            if (pat.test(ct)) { hasSameMatchChild = true; break; }
+        }
+        if (hasSameMatchChild) continue;
+        return {el: el, docNo: m[0]};
+    }
+    // S3：column-index by「公文文號」表頭
+    var ths = document.querySelectorAll('th');
+    for (var i = 0; i < ths.length; i++) {
+        if ((ths[i].textContent || '').trim().indexOf('公文文號') === -1) continue;
+        var headerRow = ths[i].parentElement;
+        if (!headerRow) continue;
+        var idx = -1;
+        for (var j = 0; j < headerRow.children.length; j++) {
+            if (headerRow.children[j] === ths[i]) { idx = j; break; }
+        }
+        if (idx === -1) continue;
+        var table = ths[i].closest('table');
+        if (!table) continue;
+        var rows = table.querySelectorAll('tbody tr');
+        for (var k = 0; k < rows.length; k++) {
+            var cells = rows[k].children;
+            if (idx >= cells.length) continue;
+            var cell = cells[idx];
+            if (cell.tagName !== 'TD') continue;
+            var kids2 = cell.querySelectorAll('*');
+            for (var n = 0; n < kids2.length; n++) {
+                var ck = kids2[n];
+                if (ck.offsetParent === null) continue;
+                var mm = pat.exec((ck.textContent || ck.value || '').trim());
+                if (mm) return {el: ck, docNo: mm[0]};
+            }
+            var mm2 = pat.exec((cell.textContent || '').trim());
+            if (mm2) return {el: cell, docNo: mm2[0]};
+        }
+    }
+    return null;
+"""
+
+
+def click_first_document_in_pending(driver, timeout=5, label="承辦中"):
+    """點清單最上方那一筆（不知道文號、點到才知道），回點到的公文文號。
+
+    跟原作者 `document_system._click_first_document_in_pending` 同一招
+    （三策略：`<a>` 文字 → 任何可見葉節點 → column-index），差別只在比對條件
+    從「元素文字**完全等於**公文號格式」放寬成「元素文字**含有**公文號格式的
+    子字串」，並且回傳**抽出來的乾淨文號**，不是元素的原始文字。
+
+    起因跟 `click_doc_by_no` 同一個病根：edoc 有些列會把「疑似重複來文」的
+    問號圖示跟公文號擠在同一個可點元素裡，textContent 變成「?MWAA1156009654」。
+    原版三個策略都要求整段文字完全符合 `^[A-Z][A-Z0-9]*\\d{4,}$`，前面多一個
+    「?」就整段比對不過，待結案清單只剩這一筆時 `process_document_closure`
+    連第一步「點最上方公文」都做不到，印「點待結案公文失敗，請手動處理」
+    —— 也就是番茄回報的「重複來文無法歸檔」（2026-09-24 實測
+    `MWAA1156009654`）。
+
+    這是 fork 側獨立的一份，不改 `document_system.py`：`archive_batch.py`
+    呼叫前把它換進 `document_system` 的模組屬性用完還原（同
+    `prep_batch.lenient_doc_click` 那招），`document_closure.py` 內部用
+    `from document_system import _click_first_document_in_pending` 取的是
+    **呼叫當下**模組屬性的值，換掉屬性就會生效，不用改 `document_closure/`
+    底下任何一行。
+    """
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        try:
+            result = driver.execute_script(_FIRST_PENDING_DOC_JS)
+        except Exception as e:
+            print(f"      x  找{label}最上方公文失敗:{type(e).__name__}: {e}")
+            return None
+        if result and result.get("docNo"):
+            doc_no = result["docNo"]
+            try:
+                driver.execute_script(
+                    "arguments[0].scrollIntoView({block:'center'});"
+                    "arguments[0].click();", result["el"])
+            except Exception as e:
+                print(f"      x  點{label}最上方公文「{doc_no}」失敗:"
+                      f"{type(e).__name__}: {e}")
+                return None
+            print(f"      OK:點到{label}最上方公文「{doc_no}」")
+            return doc_no
+        time.sleep(0.3)
+    print(f"      x  找不到{label}最上方公文連結")
+    return None
 
 
 # ── 策略 1:每頁筆數開到最大 ────────────────────────────────────────────────

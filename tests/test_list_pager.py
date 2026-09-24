@@ -256,3 +256,85 @@ def test_walk_pages_clears_previous_sign_kinds():
     lp.SIGN_KINDS["MWAA_舊的"] = "紙"
     lp.walk_pages(FakeList([["MWAA1156008753"]], next_returns_none=True))
     assert "MWAA_舊的" not in lp.SIGN_KINDS
+
+
+# ── click_doc_by_no ────────────────────────────────────────────────────────
+#
+# 這支的真正判斷式（元素文字「含有」還是「完全等於」文號）在 JS 裡，Python
+# 測試釘不住那段；這裡只釘外層合約——回布林值、例外要吞掉，不能讓整批
+# 備料／送陳核因為這一步炸掉。
+
+class FakeClickDriver:
+    def __init__(self, result):
+        self.result = result
+        self.calls = []
+
+    def execute_script(self, script, *args):
+        self.calls.append(args)
+        if isinstance(self.result, Exception):
+            raise self.result
+        return self.result
+
+
+def test_click_doc_by_no_returns_true_on_success():
+    d = FakeClickDriver(True)
+    assert lp.click_doc_by_no(d, "MWAA1156009654") is True
+    assert d.calls == [("MWAA1156009654",)]
+
+
+def test_click_doc_by_no_returns_false_when_not_found():
+    d = FakeClickDriver(False)
+    assert lp.click_doc_by_no(d, "MWAA1156009654") is False
+
+
+def test_click_doc_by_no_swallows_exceptions():
+    d = FakeClickDriver(RuntimeError("壞了"))
+    assert lp.click_doc_by_no(d, "MWAA1156009654") is False
+
+
+# ── click_first_document_in_pending ──────────────────────────────────────────
+#
+# 這支的真正判斷式（三策略比對、抽出乾淨文號）在 JS 裡，同樣用 Node 手動驗證過
+# （regex 對「?MWAA1156009654」/正常列/日期/中文標籤都對）；這裡只釘外層合約：
+# 找到就回抽出來的文號並點下去、找不到回 None、例外要吞掉不能讓整批歸檔炸掉。
+
+class FakeFirstDocDriver:
+    """第一次 execute_script（無參數）= 找列；第二次（帶參數）= 點擊。"""
+
+    def __init__(self, script_result=None, raise_on=None, click_raises=None):
+        self.script_result = script_result
+        self.raise_on = raise_on
+        self.click_raises = click_raises
+        self.calls = []
+
+    def execute_script(self, script, *args):
+        self.calls.append(args)
+        if not args:
+            if self.raise_on is not None:
+                raise self.raise_on
+            return self.script_result
+        if self.click_raises is not None:
+            raise self.click_raises
+        return None
+
+
+def test_click_first_document_in_pending_returns_doc_no_on_success():
+    d = FakeFirstDocDriver(script_result={"el": "EL", "docNo": "MWAA1156009654"})
+    assert lp.click_first_document_in_pending(d) == "MWAA1156009654"
+    assert len(d.calls) == 2   # 找列一次、點擊一次
+
+
+def test_click_first_document_in_pending_returns_none_when_not_found():
+    d = FakeFirstDocDriver(script_result=None)
+    assert lp.click_first_document_in_pending(d, timeout=0.02) is None
+
+
+def test_click_first_document_in_pending_swallows_find_exception():
+    d = FakeFirstDocDriver(raise_on=RuntimeError("壞了"))
+    assert lp.click_first_document_in_pending(d, timeout=0.02) is None
+
+
+def test_click_first_document_in_pending_returns_none_when_click_fails():
+    d = FakeFirstDocDriver(script_result={"el": "EL", "docNo": "MWAA1156009654"},
+                            click_raises=RuntimeError("click 失敗"))
+    assert lp.click_first_document_in_pending(d, timeout=0.02) is None
