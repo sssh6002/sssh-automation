@@ -228,6 +228,26 @@
   .chip:hover{background:#e3ebe7}
   .chip.on{background:var(--th);color:#fff}
   .chip .c{opacity:.65;margin-left:4px}
+  /* 自訂公告頁。卡片是上下疊的,所以不沿用 .fd（那個是橫排的）。 */
+  .secbox{border:1px solid var(--line);border-radius:10px;padding:14px 16px;
+          margin:0 0 16px 0;background:#fff}
+  .secbox h3{margin:0 0 10px 0;font-size:15px}
+  .sn{padding:8px 10px;border-bottom:1px solid var(--line)}
+  .sn:last-child{border-bottom:0}
+  .sn .sub{font-size:12px;color:var(--sub);margin-top:2px}
+  .sn .bad{color:var(--bad)}
+  .sn .fdact{margin-top:6px;display:flex;gap:8px}
+  .sn pre.body{white-space:pre-wrap;word-break:break-word;font-size:13px;
+               background:#f6faf8;border:1px solid var(--line);border-radius:8px;
+               padding:10px;margin:8px 0 0 0;max-height:340px;overflow:auto}
+  label.fl{display:block;font-size:12px;color:var(--sub);margin:10px 0 4px}
+  input.wide,textarea.wide{width:100%;box-sizing:border-box;font-size:14px;
+                           font-family:inherit;line-height:1.7}
+  .cats{display:flex;flex-wrap:wrap;gap:12px}
+  .catbox{font-size:13px;display:flex;align-items:center;gap:4px}
+  #spreview .prev{border:1px solid var(--line);border-radius:8px;overflow:auto;
+                  max-height:520px;margin-top:6px}
+  #spreview p.sub{font-size:12px;color:var(--sub);margin:12px 0 0}
   .fd{display:flex;align-items:flex-start;gap:10px;padding:8px 10px;
     border-bottom:1px solid #eef1f0}
   .fd:hover{background:#f6faf8}
@@ -243,7 +263,8 @@
   <div class="on" id="tablive">摘要</div><div class="click" id="tabsend">陳核</div>
   <div class="click" id="tabarch">存查</div>
   <div class="click" id="tabanc">公告</div>
-  <div class="click" id="tabweb">張貼</div><div class="click" id="tabold">舊文</div>
+  <div class="click" id="tabweb">張貼</div>
+  <div class="click" id="tabself">自訂公告</div><div class="click" id="tabold">舊文</div>
   <div class="click" id="tabfind">找舊文</div>
   <div class="click" id="tabset">設定</div>
 </div>
@@ -344,6 +365,24 @@
 
 <!-- 張貼的確認框。這是全站唯一真的對外的動作，所以對話框裡要看得到**整篇文案**
      （不是只有標題）—— 貼出去就是全校師生家長讀到的東西。 -->
+<!-- 自訂公告的確認框。跟張貼同一個規格:對話框裡要看得到**整篇內文**，
+     因為貼出去就是全校師生家長讀到的東西。 -->
+<div id="selfask" class="mask" hidden>
+  <div class="dlg wide">
+    <h2>確定要把這則公告貼上校網嗎？</h2>
+    <p class="danger"><b>貼出去全校師生家長都看得到。</b>
+      這一則不是公文產生的，沒有來文可以回頭對 —— <b>字是你自己寫的，
+      也只有你能確認</b>。請最後看一次標題、分類，以及整篇內文。</p>
+    <div id="selfitems"></div>
+    <p class="warnbox">程式會自己開一個 Chrome 登入校網填表單，<b>請不要動滑鼠鍵盤</b>。
+      這一段<b>不碰 edoc、不用插卡</b>。出錯會停下來，已貼出的不會重貼。</p>
+    <div class="dlgfoot">
+      <button id="selfno">再想想</button>
+      <button id="selfyes" class="risk">確定貼上校網</button>
+    </div>
+  </div>
+</div>
+
 <div id="webask" class="mask" hidden>
   <div class="dlg wide">
     <h2>確定要把這些公告貼上校網嗎？</h2>
@@ -416,15 +455,16 @@ function drawList() {
 }
 
 const TITLE = { live: "摘要", old: "舊文", send: "陳核", arch: "存查",
-                anc: "公告", web: "張貼", find: "找舊文", set: "設定" };
+                anc: "公告", web: "張貼", self: "自訂公告",
+                find: "找舊文", set: "設定" };
 // 整批處理的分頁（陳核／存查／公告／張貼）與設定頁看的都不是單筆,所以收掉左邊
 // 清單、右邊佔滿。
 const BATCH = (t) => t === "send" || t === "arch" || t === "anc" || t === "web"
-                  || t === "find" || t === "set";
+                  || t === "self" || t === "find" || t === "set";
 
 function setTab(t) {
   TAB = t;
-  ["live", "old", "send", "arch", "anc", "web", "find", "set"].forEach(k =>
+  ["live", "old", "send", "arch", "anc", "web", "self", "find", "set"].forEach(k =>
     el("tab" + k).className = t === k ? "on" : "click");
   el("title").textContent = TITLE[t];
   // 換頁等於換清單,原本選的那筆多半不在新清單裡,右邊一併清掉免得對不上。
@@ -440,6 +480,7 @@ function setTab(t) {
   if (t === "arch") return loadArch();
   if (t === "anc") return loadAnc();
   if (t === "web") return loadWeb();
+  if (t === "self") return loadSelf();
   if (t === "find") return loadFind();
   if (t === "set") return loadSet();
   el("detail").innerHTML = '<div class="empty">左邊點一筆公文。</div>';
@@ -452,6 +493,7 @@ el("tabsend").onclick = () => setTab("send");
 el("tabarch").onclick = () => setTab("arch");
 el("tabanc").onclick = () => setTab("anc");
 el("tabweb").onclick = () => setTab("web");
+el("tabself").onclick = () => setTab("self");
 el("tabfind").onclick = () => setTab("find");
 el("tabset").onclick = () => setTab("set");
 
@@ -1373,6 +1415,169 @@ el("webyes").onclick = async () => {
   watch("web");
 };
 
+// ── 自訂公告頁 ────────────────────────────────────────────────────────────
+//
+// 「我要貼一個公告，但這不是公文產生的」（承辦人 2026-09-05）。整條張貼路徑本來
+// 每一關都綁著公文，這一頁是另一個入口:自己寫、自己選分類、走同一支貼上校網。
+//
+// 這一頁**不碰 edoc、不碰公文工作區**。唯一收不回來的動作是最後那顆「貼上校網」，
+// 所以只有那顆有二段確認，其餘（打字、儲存、整理格式）隨便按都不會出事。
+//
+// ⚠️ 預覽用的 HTML 是後端拿**校網真正在用的那支排版程式**算的，不是這裡另外畫的。
+//    預覽好看、貼出去長不一樣的話，比沒有預覽還糟。
+let SELF = null;      // 後端來的清單
+let SEDIT = null;     // 正在編輯的那則 {編號,標題,內文,分類}
+
+async function loadSelf() {
+  say("讀取中…");
+  try {
+    const j = await (await fetch("/api/self/plan")).json();
+    if (!j.ok) { el("detail").innerHTML = ""; return say(j.錯誤, "err"); }
+    SELF = j;
+    if (!SEDIT) SEDIT = { 編號: "", 標題: "", 內文: "", 分類: ["處室公告"] };
+    drawSelf();
+    say("");
+  } catch (e) { say("連不上程式，是不是關掉了？", "err"); }
+}
+
+function selfCard(it, posted) {
+  const cats = (it.分類 || []).join("、") || "沒選分類";
+  return `<div class="sn">
+    <div><b>${esc(it.標題 || "(沒有標題)")}</b></div>
+    <div class="sub">${esc(it.編號)}　${esc(cats)}${
+      it.擋下原因 ? `　<span class="bad">${esc(it.擋下原因)}</span>` : ""}</div>
+    <div class="fdact">
+      ${posted ? '<span class="sub">已貼出</span>'
+               : `<button data-edit="${esc(it.編號)}">改這則</button>
+                  <button data-del="${esc(it.編號)}">刪掉</button>`}
+    </div>
+  </div>`;
+}
+
+function drawSelf() {
+  const ready = SELF.可貼 || [], blocked = SELF.擋下 || [], posted = SELF.已貼 || [];
+  const opts = (SELF.分類選項 || []).map(c =>
+    `<label class="catbox"><input type="checkbox" data-cat="${esc(c)}"
+      ${(SEDIT.分類 || []).includes(c) ? "checked" : ""}> ${esc(c)}</label>`).join("");
+  el("count").textContent =
+    `可以貼 ${ready.length} 則、還不能貼 ${blocked.length} 則、已貼出 ${posted.length} 則`;
+  el("detail").innerHTML = `
+    <div class="secbox">
+      <h3>${SEDIT.編號 ? "改這則：" + esc(SEDIT.編號) : "寫一則新的"}</h3>
+      <label class="fl">標題</label>
+      <input id="stitle" class="wide" value="${esc(SEDIT.標題)}"
+             placeholder="【載具領取公告】申請載具同學請9/7-9/24至資媒組領取">
+      <label class="fl">內文</label>
+      <textarea id="sbody" rows="14" class="wide"
+        placeholder="小標請用【】，條列用 - 或 1.">${esc(SEDIT.內文)}</textarea>
+      <p class="sub">校網的排版程式只認 <b>【小標】</b> 和 <b>## 小標</b>。
+        你打慣的 <b>■</b> 它不認得 —— 那樣整篇會被當成同一塊，
+        <b>條列會被抽到最前面、順序跑掉</b>。按「整理格式」會幫你換掉符號，
+        <b>一個字都不會改</b>，換完直接寫回上面的框，你還能再改。</p>
+      <label class="fl">分類（至少選一個，不然貼上去不會出現在任何一頁）</label>
+      <div class="cats">${opts}</div>
+      <div class="dlgfoot" style="justify-content:flex-start">
+        <button id="sfix">整理格式＋看預覽</button>
+        <button id="ssave">儲存</button>
+        <button id="snew">寫一則新的</button>
+      </div>
+      <div id="spreview"></div>
+    </div>
+    <div class="secbox">
+      <h3>可以貼的（${ready.length}）</h3>
+      ${ready.length ? ready.map(it => selfCard(it, false)).join("")
+                     : '<div class="empty">還沒有可以貼的公告。</div>'}
+      ${ready.length ? `<div class="dlgfoot" style="justify-content:flex-start">
+          <button id="sgo" class="risk">把上面這些貼上校網</button></div>` : ""}
+    </div>
+    ${blocked.length ? `<div class="secbox"><h3>還不能貼（${blocked.length}）</h3>
+      ${blocked.map(it => selfCard(it, false)).join("")}</div>` : ""}
+    ${posted.length ? `<div class="secbox"><h3>已經貼出去的（${posted.length}）</h3>
+      ${posted.map(it => selfCard(it, true)).join("")}</div>` : ""}`;
+  bindSelf();
+}
+
+function readForm() {
+  SEDIT.標題 = el("stitle").value;
+  SEDIT.內文 = el("sbody").value;
+  SEDIT.分類 = [...document.querySelectorAll("[data-cat]")]
+    .filter(b => b.checked).map(b => b.dataset.cat);
+}
+
+function bindSelf() {
+  el("sfix").onclick = async () => {
+    readForm();
+    const j = await (await fetch("/api/self/normalize", {
+      method: "POST", body: JSON.stringify({ 標題: SEDIT.標題, 內文: SEDIT.內文 })
+    })).json();
+    if (!j.ok) return say(j.錯誤, "err");
+    // 轉完的字**寫回輸入框** —— 看得到才叫整理，看不到那叫偷偷改你的字。
+    el("sbody").value = j.內文;
+    SEDIT.內文 = j.內文;
+    el("spreview").innerHTML =
+      `<p class="sub">下面是<b>校網真正會長成的樣子</b>（同一支排版程式算的）${
+        j.改了 ? `，這次換掉 ${j.改了} 行的符號` : "，這次沒有要換的符號"}。</p>
+       <div class="prev">${j.預覽}</div>`;
+    say(j.改了 ? `整理了 ${j.改了} 行` : "沒有需要整理的符號");
+  };
+  el("ssave").onclick = async () => {
+    readForm();
+    const j = await (await fetch("/api/self/save", {
+      method: "POST", body: JSON.stringify(SEDIT)
+    })).json();
+    if (!j.ok) return say(j.錯誤, "err");
+    SEDIT.編號 = j.編號;
+    say(j.擋下原因 ? `存好了，但還不能貼:${j.擋下原因}` : "存好了，可以貼了");
+    loadSelf();
+  };
+  el("snew").onclick = () => {
+    SEDIT = { 編號: "", 標題: "", 內文: "", 分類: ["處室公告"] };
+    drawSelf();
+  };
+  document.querySelectorAll("[data-edit]").forEach(b => b.onclick = () => {
+    const it = [...(SELF.可貼 || []), ...(SELF.擋下 || [])]
+      .find(x => x.編號 === b.dataset.edit);
+    if (!it) return;
+    SEDIT = { 編號: it.編號, 標題: it.標題, 內文: it.內文, 分類: [...(it.分類 || [])] };
+    drawSelf();
+  });
+  document.querySelectorAll("[data-del]").forEach(b => b.onclick = async () => {
+    const j = await (await fetch("/api/self/delete", {
+      method: "POST", body: JSON.stringify({ 編號: b.dataset.del })
+    })).json();
+    if (!j.ok) return say(j.錯誤, "err");
+    if (SEDIT.編號 === b.dataset.del) SEDIT = { 編號: "", 標題: "", 內文: "", 分類: ["處室公告"] };
+    loadSelf();
+  });
+  const go = el("sgo");
+  if (go) go.onclick = () => {
+    // 確認框裡放**整篇內文**，不是只有標題 —— 要確認的是全校會看到的那幾百字。
+    el("selfitems").innerHTML = (SELF.可貼 || []).map(it => `
+      <div class="sn"><div><b>${esc(it.標題)}</b></div>
+        <div class="sub">${esc(it.編號)}　分類:${esc((it.分類 || []).join("、"))}</div>
+        <pre class="body">${esc(it.內文)}</pre></div>`).join("");
+    show("selfask", true);
+  };
+}
+
+el("selfno").onclick = () => show("selfask", false);
+el("selfyes").onclick = async () => {
+  show("selfask", false);
+  const go = (SELF && SELF.可貼) || [];
+  const j = await (await fetch("/api/self/start", {
+    method: "POST",
+    // 編號**和指紋**一起送。只比編號擋不住「字被換掉」（同張貼頁,坑 #24）。
+    body: JSON.stringify({
+      確認: true,
+      編號: go.map(it => it.編號),
+      指紋: Object.fromEntries(go.map(it => [it.編號, it.指紋]))
+    })
+  })).json();
+  if (!j.ok) return say(j.錯誤, "err");
+  say(`開始貼上校網 ${j.筆數} 則`);
+  watch("self");
+};
+
 // ── 設定頁 ────────────────────────────────────────────────────────────────
 //
 // 兩區:**個人**（PIN、校網帳密、API key）與**共用**（發布單位、發布者、摘要要叫
@@ -2124,11 +2329,12 @@ async function tick() {
 // 要重讀 edoc 得按頁面裡的「重讀清單」。誤觸重新整理不該去動瀏覽器。
 el("reload").onclick = () => TAB === "arch" ? loadArch()
   : TAB === "send" ? loadSend() : TAB === "anc" ? loadAnc()
-  : TAB === "web" ? loadWeb() : TAB === "set" ? loadSet() : load();
+  : TAB === "web" ? loadWeb() : TAB === "self" ? loadSelf()
+  : TAB === "set" ? loadSet() : load();
 load();
 // 萬一頁面重整時工作還在跑,接回去繼續看。六支都要問 —— 重整那一刻正在跑的
 // 可能是送陳核或歸檔，接錯支就會盯著一個沒在動的面板。
-["prep", "send", "scan", "archive", "announce", "web"].forEach(job =>
+["prep", "send", "scan", "archive", "announce", "web", "self"].forEach(job =>
   fetch(`/api/${job}/status?since=0`).then(r => r.json())
     .then(j => { if (j.執行中) watch(job); }).catch(() => {}));
 </script>

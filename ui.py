@@ -848,8 +848,30 @@ WEB = Job("貼上校網", ["post_web_batch.py", "--go"],
           hud="web", hud_label="貼上校網中…請不要動滑鼠")
 
 # 進度面板／停止鈕共用同一組路由。名字就是網址裡的那一段:/api/<名字>/status。
+# 貼自訂公告（不是公文產生的那種）。跟 WEB 同樣是**真的對外**，所以同一套
+# 二段確認＋指紋比對;開浮窗的理由也一樣（會自己開 Chrome 填校網表單）。
+SELFN = Job("貼自訂公告", ["custom_notice.py", "--go"],
+            hud="self", hud_label="貼上校網中…請不要動滑鼠")
+
 JOBS = {"prep": PREP, "send": SEND, "scan": SCAN, "archive": ARCH,
-        "announce": ANNC, "web": WEB}
+        "announce": ANNC, "web": WEB, "self": SELFN}
+
+
+def self_payload():
+    """自訂公告頁的資料。**不碰 edoc、不碰公文工作區** —— 這一頁的來源只有
+    `custom_notices/`，跟公文那條路完全分開（放進 document_download 的話，備料、
+    找舊文、存查、歸檔會通通把它當一份公文撈進來，那是會安靜長歪的錯）。"""
+    import custom_notice as cn
+    ready, blocked = cn.plan()
+    posted = [{"編號": nid, "標題": (cn.load(nid) or {}).get("標題", "")}
+              for nid in cn.list_ids() if cn.is_posted(nid)]
+    # 已經貼出去的也會被 plan() 判成「擋下（已經貼過了）」。畫面上不要讓它出現
+    # 兩次 —— 「還不能貼」那一區是**還沒好的草稿**，貼完的那些歸「已經貼出去」，
+    # 兩區的意思不一樣，混在一起會讓人以為有東西卡住。
+    done = {it["編號"] for it in posted}
+    blocked = [it for it in blocked if it["編號"] not in done]
+    return {"可貼": ready, "擋下": blocked, "已貼": posted,
+            "分類選項": list(cn.CATEGORY_OPTIONS)}
 
 
 # ── HTTP ───────────────────────────────────────────────────────────────────
@@ -933,6 +955,11 @@ class Handler(BaseHTTPRequestHandler):
         if path == "/api/file/plan":
             try:
                 return self._json({"ok": True, **file_payload()})
+            except Exception as e:
+                return self._json({"ok": False, "錯誤": f"{type(e).__name__}: {e}"})
+        if path == "/api/self/plan":
+            try:
+                return self._json({"ok": True, **self_payload()})
             except Exception as e:
                 return self._json({"ok": False, "錯誤": f"{type(e).__name__}: {e}"})
         if path == "/api/find/plan":
@@ -1171,6 +1198,95 @@ class Handler(BaseHTTPRequestHandler):
             ok, err = WEB.start()
             return self._json({"ok": ok, "錯誤": err} if not ok
                               else {"ok": True, "筆數": len(now)})
+
+        if path == "/api/self/normalize":
+            # 只算，不存。把 ■ 換成【】、‧ 換成 -，順便回傳「校網真正會長成
+            # 什麼樣」的 HTML。轉完的字寫回輸入框讓他看得到、可以再改 ——
+            # **不在送出時偷偷轉**，那等於程式動承辦人自己寫的字。
+            import custom_notice as cn
+            body_text = str(body.get("內文") or "")
+            fixed, changed = cn.normalize_body(body_text)
+            try:
+                html_ = cn.preview_html(str(body.get("標題") or ""), fixed)
+            except Exception as e:
+                return self._json({"ok": False, "錯誤": f"{type(e).__name__}: {e}"})
+            return self._json({"ok": True, "內文": fixed, "改了": changed,
+                               "預覽": html_})
+
+        if path == "/api/self/save":
+            import custom_notice as cn
+            nid = str(body.get("編號") or "").strip() or None
+            if nid and cn.is_posted(nid):
+                return self._json({"ok": False,
+                                   "錯誤": "這則已經貼出去了，不能再改。"
+                                           "要發新的請按「寫一則新的」。"})
+            try:
+                nid = cn.save(body.get("標題"), body.get("內文"),
+                              body.get("分類") or [], notice_id=nid)
+            except OSError as e:
+                return self._json({"ok": False, "錯誤": f"存檔失敗:{e}"})
+            return self._json({"ok": True, "編號": nid,
+                               **{k: v for k, v in cn.evaluate(nid).items()
+                                  if k in ("擋下原因",)}})
+
+        if path == "/api/self/delete":
+            # 只刪還沒貼出去的草稿。已經貼上校網的那則**不准刪** ——
+            # 它的資料夾就是「貼過了」的痕跡，刪掉等於把痕跡抹掉，下次會重貼。
+            import shutil
+
+            import custom_notice as cn
+            nid = str(body.get("編號") or "").strip()
+            if not nid or nid not in cn.list_ids():
+                return self._json({"ok": False, "錯誤": "找不到這則公告"})
+            if cn.is_posted(nid):
+                return self._json({"ok": False,
+                                   "錯誤": "這則已經貼上校網了，不能刪 —— "
+                                           "資料夾就是「貼過了」的痕跡，"
+                                           "刪掉下次會重貼一次。"})
+            try:
+                shutil.rmtree(cn.notice_path(nid))
+            except OSError as e:
+                return self._json({"ok": False, "錯誤": f"刪不掉:{e}"})
+            return self._json({"ok": True})
+
+        if path == "/api/self/start":
+            # **真的對外。** 跟張貼頁同一套關卡（那幾道的理由見 /api/web/start）:
+            # 沒帶確認不動、畫面那幾則要跟現算的一樣、內容指紋也要一樣、
+            # 收文那個 Chrome 還開著不放行。
+            if not body.get("確認"):
+                return self._json({"ok": False, "錯誤": "缺少確認"}, 400)
+            seen = [str(x).strip() for x in (body.get("編號") or [])]
+            if not seen:
+                return self._json({"ok": False, "錯誤": "沒有要貼的公告"})
+            try:
+                import custom_notice as cn
+                import post_web_batch as pwb
+                ready, _ = cn.plan()
+            except Exception as e:
+                return self._json({"ok": False, "錯誤": f"{type(e).__name__}: {e}"})
+            now = {it["編號"]: it["指紋"] for it in ready}
+            missing = sorted(no for no in seen if no not in now)
+            if missing:
+                return self._json({
+                    "ok": False,
+                    "錯誤": f"這幾則現在貼不了:{'、'.join(missing)}"
+                            f"（可能剛被改、或已經貼過）—— 沒有貼出去，"
+                            f"請按「重新整理」再看一次。"})
+            marks = body.get("指紋") or {}
+            bad = sorted(no for no in seen
+                         if str(marks.get(no) or "") != now[no])
+            if bad:
+                return self._json({
+                    "ok": False,
+                    "錯誤": f"這幾則要貼的字跟你剛才確認的不一樣了:{'、'.join(bad)}"
+                            f" —— 沒有貼出去，請按「重新整理」再看一次。"})
+            busy = pwb.chrome_in_the_way()
+            if busy:
+                return self._json({"ok": False, "錯誤": busy})
+            SELFN.argv = ["custom_notice.py", "--go"] +                          [f"{no}:{now[no]}" for no in sorted(seen)]
+            ok, err = SELFN.start()
+            return self._json({"ok": ok, "錯誤": err} if not ok
+                              else {"ok": True, "筆數": len(seen)})
 
         parts = path.strip("/").split("/")
         if len(parts) == 3 and parts[0] == "api" and parts[2] == "stop" \

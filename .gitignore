@@ -41,9 +41,12 @@ python-path.txt
 #目錄
 document_download/*
 document_download_closure/*
+# 自訂公告（承辦人自己寫的公告草稿與已公告痕跡,跟公文工作區同樣是本機資料）
+custom_notices/*
 #強制 Git 不要忽略 .gitkeep 檔案（這樣目錄就會被保留）
 !/document_download/.gitkeep
 !/document_download_closure/.gitkeep
+!/custom_notices/.gitkeep
 
 # doc_classifier
 doc_classifier/training_data/*
