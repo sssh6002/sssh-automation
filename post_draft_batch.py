@@ -516,6 +516,39 @@ def close_viewer(driver, doc_no):
             continue
 
 
+def left_pending(driver, doc_no, label="承辦中", timeout=20.0):
+    """送出後回「承辦中」清單確認這一筆真的不見了。回 True/False。
+
+    **簽章視窗關掉 ≠ 送出去了**:fill_in_draft 的成功判準只到「pinCode 視窗有
+    關」為止，伺服器那端有沒有收下沒人看。2026-09-30 實測 MWAA1156009890:程式
+    印「OK 已送陳核」、寫了 已陳核.txt，edoc 上那份公文卻還在承辦中（狀態
+    「來文待辦」）——標記一寫，陳核頁就把它當成送過了藏起來，承辦人看不到也送不了。
+
+    所以標記要等 edoc 自己的清單作證才寫。讀不清楚（清單沒載入、一列都讀不到）
+    一律當成「沒送走」:寧可多停一次讓人看，也不要把沒送的公文藏起來。
+    """
+    import list_pager
+    from document_system import _switch_to_frame_with_xpath
+    from edoc_sidebar import click_sidebar, sidebar_count
+
+    deadline = time.time() + timeout
+    while True:
+        driver.switch_to.default_content()
+        if click_sidebar(driver, label):
+            time.sleep(2.0)
+            if sidebar_count(driver, label) == 0:
+                return True
+            driver.switch_to.default_content()
+            if _switch_to_frame_with_xpath(driver, _LIST_XPATH, "公文文號表頭",
+                                           timeout=5) \
+                    and list_pager.page_doc_nos(driver) \
+                    and not list_pager.find_doc_across_pages(driver, doc_no):
+                return True
+        if time.time() >= deadline:
+            return False
+        time.sleep(2.0)
+
+
 def run(ready, driver):
     """逐筆送陳核。任一筆失敗即中止，回 (成功數, 失敗的那筆 or None)。"""
     # 這裡不用 document_system._click_doc_by_no（要求元素文字完全等於文號）——
@@ -556,6 +589,14 @@ def run(ready, driver):
         ok = fill_in_draft(driver, d, fragment=it["送出文字"], action="陳會")
         if not ok:
             print("      x  填字/儲存/陳會/簽章失敗 — 整批中止")
+            return done, it
+
+        # 簽章視窗關了還不算數，要 edoc 清單裡真的少了這一筆（見 left_pending）
+        driver.switch_to.window(main_handle)
+        if not left_pending(driver, doc_no):
+            print("      x  簽章視窗關了，但這份公文還在「承辦中」—— edoc 沒有收下。"
+                  "沒有寫已陳核標記，整批中止。請看公文閱覽器分頁有沒有錯誤訊息，"
+                  "必要時手動按「陳會」。")
             return done, it
 
         with open(marker_path(d, doc_no), "w", encoding="utf-8") as f:

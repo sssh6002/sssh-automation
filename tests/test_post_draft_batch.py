@@ -441,6 +441,82 @@ def test_run_stops_when_no_main_window(monkeypatch):
     assert done == 0 and failed["文號"] == "MWAA0001"
 
 
+def _run_one_with_fake_edoc(monkeypatch, tmp_path, still_pending):
+    """跑 run() 一筆:前面每一關都過、fill_in_draft 回 True(簽章視窗也關了)。
+    still_pending —— 送完回承辦中清單時,這一筆還在不在。"""
+    import fill_in_draft as fid
+    import list_pager
+    monkeypatch.setattr(pdb, "focus_main_window", lambda d: True)
+    monkeypatch.setattr(pdb, "focus_list", lambda d, no: True)
+    monkeypatch.setattr(list_pager, "click_doc_by_no", lambda d, no: True)
+    monkeypatch.setattr(pdb, "wait_viewer", lambda d, no: True)
+    monkeypatch.setattr(pdb, "ensure_viewer_ready", lambda d: True)
+    monkeypatch.setattr(pdb, "close_viewer", lambda d, no: None)
+    monkeypatch.setattr(pdb.time, "sleep", lambda s: None)
+    monkeypatch.setattr(fid, "fill_in_draft", lambda *a, **k: True)
+    monkeypatch.setattr(pdb, "left_pending",
+                        lambda d, no, **k: not still_pending)
+    it = {"文號": "MWAA1156009890", "主旨": "無人機足球", "目錄": str(tmp_path),
+          "送出文字": DEFAULT}
+    return it, pdb.run([it], _MultiTabDriver({"h": (HOME, True)}))
+
+
+def test_run_no_marker_when_doc_still_pending(monkeypatch, tmp_path):
+    """簽章視窗關了 ≠ 送出去了。
+
+    2026-09-30 實測 MWAA1156009890:程式印「OK 已送陳核」、寫了 已陳核.txt,
+    edoc 上那份公文卻還在承辦中(狀態「來文待辦」)。標記一寫,陳核頁就把它當
+    成「已經送過」藏起來,承辦人看不到、也送不了。
+    """
+    it, (done, failed) = _run_one_with_fake_edoc(monkeypatch, tmp_path, True)
+    assert done == 0 and failed is it
+    assert not pdb.already_sent(str(tmp_path), it["文號"])
+
+
+def test_run_writes_marker_once_doc_left_pending(monkeypatch, tmp_path):
+    it, (done, failed) = _run_one_with_fake_edoc(monkeypatch, tmp_path, False)
+    assert done == 1 and failed is None
+    assert pdb.already_sent(str(tmp_path), it["文號"])
+
+
+def _fake_pending_list(monkeypatch, count, page):
+    import document_system as ds
+    import edoc_sidebar as sb
+    import list_pager
+    monkeypatch.setattr(pdb.time, "sleep", lambda s: None)
+    monkeypatch.setattr(sb, "click_sidebar", lambda d, lab: True)
+    monkeypatch.setattr(sb, "sidebar_count", lambda d, lab: count)
+    monkeypatch.setattr(ds, "_switch_to_frame_with_xpath", lambda *a, **k: True)
+    monkeypatch.setattr(list_pager, "page_doc_nos", lambda d: list(page))
+    monkeypatch.setattr(list_pager, "find_doc_across_pages",
+                        lambda d, no, **k: no in page)
+
+
+def test_left_pending_when_count_drops_to_zero(monkeypatch):
+    _fake_pending_list(monkeypatch, 0, [])
+    assert pdb.left_pending(_MultiTabDriver({"h": (HOME, True)}),
+                            "MWAA1156009890", timeout=0) is True
+
+
+def test_left_pending_false_while_doc_still_listed(monkeypatch):
+    _fake_pending_list(monkeypatch, 1, ["MWAA1156009890"])
+    assert pdb.left_pending(_MultiTabDriver({"h": (HOME, True)}),
+                            "MWAA1156009890", timeout=0) is False
+
+
+def test_left_pending_true_when_only_other_docs_listed(monkeypatch):
+    _fake_pending_list(monkeypatch, 1, ["MWAA1156000001"])
+    assert pdb.left_pending(_MultiTabDriver({"h": (HOME, True)}),
+                            "MWAA1156009890", timeout=0) is True
+
+
+def test_left_pending_empty_page_is_not_proof(monkeypatch):
+    """左邊寫承辦中(1)、清單卻一列都讀不到 = 還沒載入好,不能當成「送走了」。"""
+    _fake_pending_list(monkeypatch, 1, [])
+    assert pdb.left_pending(_MultiTabDriver({"h": (HOME, True)}),
+                            "MWAA1156009890", timeout=0) is False
+
+
 def test_focus_list_gives_up_when_sidebar_click_fails(monkeypatch):
     class D:
         switch_to = property(lambda self: self)
