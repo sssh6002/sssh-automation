@@ -237,3 +237,9 @@ def test_pii_marked_docs_are_skipped(env):
     todo, skip = ad.plan(sheet)
     assert todo == []
     assert "含個資" in skip[0]["略過"]
+
+
+def test_content_of_survives_corrupt_file(tmp_path):
+    """壞掉的 內容.txt 當作讀不到,不要讓整批公告文案當掉（2026-10-29 實機）。"""
+    (tmp_path / "1_2內容.txt").write_bytes(b"INDX(\x00\xbb\xff")
+    assert ad._content_of(str(tmp_path)) is None

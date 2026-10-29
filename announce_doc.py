@@ -153,7 +153,11 @@ def _content_of(doc_dir):
     hits = sorted(glob.glob(os.path.join(doc_dir, "*內容.txt")))
     if not hits:
         return None
-    return open(hits[0], encoding="utf-8").read()
+    try:
+        return open(hits[0], encoding="utf-8").read()
+    except UnicodeDecodeError:  # 壞檔見 review_sheet._read_first
+        print(f"[announce_doc] ⚠ 檔案內容壞掉、讀不出文字，當作沒有:{hits[0]}")
+        return None
 
 
 def plan(path=None, overwrite=False, only=None, sent_only=False):

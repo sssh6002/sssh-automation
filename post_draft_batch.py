@@ -183,7 +183,7 @@ def _read_content(doc_dir):
         return ""
     try:
         return open(hits[0], encoding="utf-8").read()
-    except OSError:
+    except (OSError, UnicodeDecodeError):  # 壞檔見 review_sheet._read_first
         return ""
 
 

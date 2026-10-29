@@ -74,6 +74,11 @@ def _read_first(pattern_dir, pattern):
         return open(hits[0], encoding="utf-8").read()
     except OSError:
         return None
+    except UnicodeDecodeError:
+        # 2026-10-29:檔案在磁碟上壞掉（內容變成 NTFS 索引資料），整份審核表
+        # 同步因此中止。壞一份當作讀不到，其餘照跑。
+        print(f"[review_sheet] ⚠ 檔案內容壞掉、讀不出文字，當作沒有:{hits[0]}")
+        return None
 
 
 def _extract_explanation(content_txt):

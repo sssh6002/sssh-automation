@@ -367,3 +367,11 @@ def test_is_archived_when_marker_wiped_by_later_archive(tmp_path, monkeypatch):
     row = {"陳會": "OK", "張貼": "OK"}
     assert rs.is_archived(row, d) is True
     assert rs.pending_archive(row, d) is False
+
+
+def test_read_first_survives_corrupt_file(tmp_path, capsys):
+    """2026-10-29:一份公文的 內容.txt 在磁碟上壞掉（內容變成 NTFS 索引資料）,
+    整個同步審核表因 UnicodeDecodeError 中止。壞一份不能拖垮全部。"""
+    (tmp_path / "1_2內容.txt").write_bytes(b"\xbb@x[0\x92g\xcd")
+    assert rs._read_first(str(tmp_path), "*內容.txt") is None
+    assert "1_2內容.txt" in capsys.readouterr().out

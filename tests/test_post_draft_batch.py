@@ -715,3 +715,9 @@ def test_returned_doc_blocked_even_when_approved(env, monkeypatch):
     ready, blocked = pdb.plan(sheet)
     assert ready == []
     assert "被退過" in blocked[0]["擋下原因"]
+
+
+def test_read_content_survives_corrupt_file(tmp_path):
+    """壞掉的 內容.txt 不能讓整批預覽當掉（2026-10-29 實機）。"""
+    (tmp_path / "1_2內容.txt").write_bytes(b"INDX(\x00\xbb\xff")
+    assert pdb._read_content(str(tmp_path)) == ""
