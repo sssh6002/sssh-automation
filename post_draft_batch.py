@@ -516,16 +516,46 @@ def close_viewer(driver, doc_no):
             continue
 
 
+SENT_LABEL = "對方未簽收"   # 已處理公文 > 對方未簽收:剛送出、主管還沒簽收的都在這
+
+
+def sent_out(driver, doc_no, label=SENT_LABEL):
+    """這份公文在不在「已處理公文 > 對方未簽收」。回 True/False。
+
+    這是「送出去了」的**正面證據**:陳核一送出，edoc 就把它列在這裡（作業別
+    「陳核(待簽收)」），直到主管簽收。2026-10-01 實測 MWAA1156009890 就在這裡
+    找到的 —— 承辦中已經沒有它，程式卻沒寫標記。
+    讀不到（點不到、清單沒載入）一律回 False，由呼叫端決定要不要停。
+    """
+    import list_pager
+    from document_system import _switch_to_frame_with_xpath
+    from edoc_sidebar import click_sidebar
+
+    driver.switch_to.default_content()
+    if not click_sidebar(driver, label):
+        return False
+    time.sleep(2.0)
+    driver.switch_to.default_content()
+    if not _switch_to_frame_with_xpath(driver, _LIST_XPATH, "公文文號表頭",
+                                       timeout=8):
+        return False
+    return bool(list_pager.find_doc_across_pages(driver, doc_no))
+
+
 def left_pending(driver, doc_no, label="承辦中", timeout=20.0):
-    """送出後回「承辦中」清單確認這一筆真的不見了。回 True/False。
+    """送出後確認這一筆真的離開承辦中了。回 True/False。
 
     **簽章視窗關掉 ≠ 送出去了**:fill_in_draft 的成功判準只到「pinCode 視窗有
     關」為止，伺服器那端有沒有收下沒人看。2026-09-30 實測 MWAA1156009890:程式
     印「OK 已送陳核」、寫了 已陳核.txt，edoc 上那份公文卻還在承辦中（狀態
     「來文待辦」）——標記一寫，陳核頁就把它當成送過了藏起來，承辦人看不到也送不了。
 
-    所以標記要等 edoc 自己的清單作證才寫。讀不清楚（清單沒載入、一列都讀不到）
-    一律當成「沒送走」:寧可多停一次讓人看，也不要把沒送的公文藏起來。
+    所以標記要等 edoc 自己的清單作證才寫。先看正面證據（「對方未簽收」裡有它，
+    見 sent_out）；再看反面（承辦中歸零、或清單有東西但沒有它）。
+    只看反面不夠:2026-10-01 同一份公文 08:20 真的送出去了，程式卻沒寫標記 ——
+    剛送完時承辦中讀不清楚，就被當成「沒送走」。
+    讀不清楚（清單沒載入、一列都讀不到）一律當成「沒送走」:寧可多停一次讓人看，
+    也不要把沒送的公文藏起來。
     """
     import list_pager
     from document_system import _switch_to_frame_with_xpath
@@ -533,6 +563,8 @@ def left_pending(driver, doc_no, label="承辦中", timeout=20.0):
 
     deadline = time.time() + timeout
     while True:
+        if sent_out(driver, doc_no):
+            return True
         driver.switch_to.default_content()
         if click_sidebar(driver, label):
             time.sleep(2.0)
@@ -547,6 +579,11 @@ def left_pending(driver, doc_no, label="承辦中", timeout=20.0):
         if time.time() >= deadline:
             return False
         time.sleep(2.0)
+
+
+def _write_marker(d, doc_no, text, note=""):
+    with open(marker_path(d, doc_no), "w", encoding="utf-8") as f:
+        f.write(f"已陳核{note}。擬辦：{text}\n")
 
 
 def run(ready, driver):
@@ -570,8 +607,21 @@ def run(ready, driver):
 
         driver.switch_to.window(main_handle)
         driver.switch_to.default_content()
+        # 先問它是不是已經送出去了（上一輪送了、只是標記沒寫成）。
+        # ⚠️ 一定要排在 focus_list **前面**:focus_list 先看「畫面上現在那張清單」有沒有
+        # 這一筆,而上一筆的 left_pending 剛把畫面停在「對方未簽收」—— 排在後面的話,
+        # 已送出的公文會在那張清單裡被找到、被點開、再被填一次擬辦按陳會
+        # (2026-08-06 在待結案清單找要送的公文,是同一個坑)。
+        if sent_out(driver, doc_no):
+            _write_marker(d, doc_no, it["送出文字"], "（補寫:edoc「對方未簽收」"
+                          "裡已經有它，先前其實已送出）")
+            print(f"      OK 這份公文已經在「{SENT_LABEL}」—— 先前其實送出去了，"
+                  f"補寫標記，不重送")
+            done += 1
+            continue
         if not focus_list(driver, doc_no):
-            print("      x  切不到含這一筆的「承辦中」清單")
+            print("      x  切不到含這一筆的「承辦中」清單，"
+                  f"「{SENT_LABEL}」裡也沒有它")
             return done, it
         if not _click_doc_by_no(driver, doc_no):
             print("      x  清單裡找不到這份公文（可能已被送走或不在承辦中）")
@@ -588,19 +638,27 @@ def run(ready, driver):
 
         ok = fill_in_draft(driver, d, fragment=it["送出文字"], action="陳會")
         if not ok:
+            # 回報失敗也可能其實送出去了（例如簽章視窗慢了才關）—— 看一眼再說,
+            # 送出去了卻沒標記，下次陳核頁又會把它列成「會送出」
+            driver.switch_to.window(main_handle)
+            if sent_out(driver, doc_no):
+                _write_marker(d, doc_no, it["送出文字"],
+                              "（簽章那關回報失敗，但 edoc 已經收下）")
+                print(f"      !  簽章那關回報失敗，但這份公文已經在「{SENT_LABEL}」"
+                      "—— 寫了標記。整批先停，請看一下閱覽器/簽章視窗有沒有殘留")
+                return done + 1, it
             print("      x  填字/儲存/陳會/簽章失敗 — 整批中止")
             return done, it
 
-        # 簽章視窗關了還不算數，要 edoc 清單裡真的少了這一筆（見 left_pending）
+        # 簽章視窗關了還不算數，要 edoc 清單作證（見 left_pending）
         driver.switch_to.window(main_handle)
         if not left_pending(driver, doc_no):
-            print("      x  簽章視窗關了，但這份公文還在「承辦中」—— edoc 沒有收下。"
-                  "沒有寫已陳核標記，整批中止。請看公文閱覽器分頁有沒有錯誤訊息，"
-                  "必要時手動按「陳會」。")
+            print("      x  簽章視窗關了，但這份公文還在「承辦中」、也不在"
+                  f"「{SENT_LABEL}」—— edoc 沒有收下。沒有寫已陳核標記，整批中止。"
+                  "請看公文閱覽器分頁有沒有錯誤訊息，必要時手動按「陳會」。")
             return done, it
 
-        with open(marker_path(d, doc_no), "w", encoding="utf-8") as f:
-            f.write(f"已陳核。擬辦：{it['送出文字']}\n")
+        _write_marker(d, doc_no, it["送出文字"])
         print(f"      OK 已送陳核，寫入標記 {doc_no}{MARKER_SUFFIX}")
         done += 1
         # 送走了,把那個閱覽器分頁收掉,免得下一筆被塞進這裡

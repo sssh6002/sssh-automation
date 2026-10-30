@@ -441,24 +441,91 @@ def test_run_stops_when_no_main_window(monkeypatch):
     assert done == 0 and failed["文號"] == "MWAA0001"
 
 
-def _run_one_with_fake_edoc(monkeypatch, tmp_path, still_pending):
-    """跑 run() 一筆:前面每一關都過、fill_in_draft 回 True(簽章視窗也關了)。
-    still_pending —— 送完回承辦中清單時,這一筆還在不在。"""
+def _run_one_with_fake_edoc(monkeypatch, tmp_path, still_pending,
+                            filled=True, in_list=True, out=None, out_before=False):
+    """跑 run() 一筆。
+    still_pending —— 送完之後 edoc 還認不認為它在承辦中(left_pending 的反面)
+    filled        —— fill_in_draft 回報成功與否
+    in_list       —— 開跑時承辦中清單裡有沒有這一筆
+    out           —— 送完之後「對方未簽收」裡有沒有它(None = 跟著 not still_pending)
+    out_before    —— 還沒送之前「對方未簽收」裡就有它(上一輪送了、標記沒寫成)
+    """
     import fill_in_draft as fid
     import list_pager
+    sent = []
     monkeypatch.setattr(pdb, "focus_main_window", lambda d: True)
-    monkeypatch.setattr(pdb, "focus_list", lambda d, no: True)
+    monkeypatch.setattr(pdb, "focus_list", lambda d, no: in_list)
     monkeypatch.setattr(list_pager, "click_doc_by_no", lambda d, no: True)
     monkeypatch.setattr(pdb, "wait_viewer", lambda d, no: True)
     monkeypatch.setattr(pdb, "ensure_viewer_ready", lambda d: True)
     monkeypatch.setattr(pdb, "close_viewer", lambda d, no: None)
     monkeypatch.setattr(pdb.time, "sleep", lambda s: None)
-    monkeypatch.setattr(fid, "fill_in_draft", lambda *a, **k: True)
+    monkeypatch.setattr(fid, "fill_in_draft",
+                        lambda *a, **k: sent.append(1) or filled)
     monkeypatch.setattr(pdb, "left_pending",
                         lambda d, no, **k: not still_pending)
+    monkeypatch.setattr(pdb, "sent_out",
+                        lambda d, no, **k: out_before if not sent
+                        else ((not still_pending) if out is None else out))
     it = {"文號": "MWAA1156009890", "主旨": "無人機足球", "目錄": str(tmp_path),
           "送出文字": DEFAULT}
-    return it, pdb.run([it], _MultiTabDriver({"h": (HOME, True)}))
+    res = pdb.run([it], _MultiTabDriver({"h": (HOME, True)}))
+    it["_送了幾次"] = len(sent)
+    return it, res
+
+
+def test_run_marks_when_sign_step_fails_but_doc_went_out(monkeypatch, tmp_path):
+    """簽章那關回報失敗,但公文其實已經在「對方未簽收」—— 要補寫標記。
+
+    2026-10-01 實測 MWAA1156009890:08:20:18 已經陳核給主管,程式卻沒寫標記,
+    陳核頁還把它列在「會送出」,重跑就在承辦中找不到它而停住。
+    """
+    it, (done, failed) = _run_one_with_fake_edoc(
+        monkeypatch, tmp_path, still_pending=False, filled=False)
+    assert pdb.already_sent(str(tmp_path), it["文號"])
+    assert failed is it            # 簽章那關確實出過狀況,整批還是要停下來給人看
+
+
+def test_run_backfills_marker_when_doc_already_sent(monkeypatch, tmp_path):
+    """承辦中找不到、但在「對方未簽收」裡 → 已經送了,補標記、不重送、不擋後面。"""
+    it, (done, failed) = _run_one_with_fake_edoc(
+        monkeypatch, tmp_path, still_pending=True, in_list=False, out_before=True)
+    assert (done, failed) == (1, None)
+    assert it["_送了幾次"] == 0
+    assert pdb.already_sent(str(tmp_path), it["文號"])
+
+
+def test_run_never_resends_doc_already_out_even_if_list_finds_it(monkeypatch, tmp_path):
+    """已經在「對方未簽收」的公文,就算 focus_list 在畫面上那張清單找得到它
+    (上一筆剛把畫面停在對方未簽收),也絕不能再填一次、再按一次陳會。"""
+    it, (done, failed) = _run_one_with_fake_edoc(
+        monkeypatch, tmp_path, still_pending=False, in_list=True, out_before=True)
+    assert (done, failed) == (1, None)
+    assert it["_送了幾次"] == 0
+
+
+def test_run_stops_when_doc_nowhere(monkeypatch, tmp_path):
+    """承辦中、對方未簽收都沒有 → 不知道它去哪了,停下來,不寫標記。"""
+    it, (done, failed) = _run_one_with_fake_edoc(
+        monkeypatch, tmp_path, still_pending=True, in_list=False, out=False)
+    assert (done, failed) == (0, it)
+    assert not pdb.already_sent(str(tmp_path), it["文號"])
+
+
+def test_left_pending_trusts_sent_out_list(monkeypatch):
+    """承辦中讀不清楚(左邊數字還沒更新、清單空白),但「對方未簽收」看得到它 → 算送出了。"""
+    _fake_pending_list(monkeypatch, 1, [])
+    monkeypatch.setattr(pdb, "sent_out", lambda d, no, **k: True)
+    assert pdb.left_pending(_MultiTabDriver({"h": (HOME, True)}),
+                            "MWAA1156009890", timeout=0) is True
+
+
+def test_sent_out_finds_doc_in_awaiting_receipt(monkeypatch):
+    _fake_pending_list(monkeypatch, 1, ["MWAA1156009890"], stub_sent_out=False)
+    assert pdb.sent_out(_MultiTabDriver({"h": (HOME, True)}),
+                        "MWAA1156009890") is True
+    assert pdb.sent_out(_MultiTabDriver({"h": (HOME, True)}),
+                        "MWAA1156000001") is False
 
 
 def test_run_no_marker_when_doc_still_pending(monkeypatch, tmp_path):
@@ -479,7 +546,11 @@ def test_run_writes_marker_once_doc_left_pending(monkeypatch, tmp_path):
     assert pdb.already_sent(str(tmp_path), it["文號"])
 
 
-def _fake_pending_list(monkeypatch, count, page):
+def _fake_pending_list(monkeypatch, count, page, stub_sent_out=True):
+    """假的清單:每張清單長得都一樣(count/page)。stub_sent_out —— 預設把
+    「對方未簽收」那張關掉(回 False),只測承辦中那一半。"""
+    if stub_sent_out:
+        monkeypatch.setattr(pdb, "sent_out", lambda d, no, **k: False)
     import document_system as ds
     import edoc_sidebar as sb
     import list_pager
