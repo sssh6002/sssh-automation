@@ -107,6 +107,24 @@ def _status(row, doc_dir):
     return out
 
 
+def _can_mark_post(row, doc_dir):
+    """摘要頁「公告 OK」給不給按。貼過的「張貼」欄會停在 OK,不能讓人去清掉它;
+    貼過與否沿用 review_sheet 那組痕跡（資料夾標記＋各工作區清冊）。"""
+    v = row.get("張貼")
+    if not str(row.get("公告") or "").strip():
+        return False
+    if not (rs.is_approved(v) or not str(v or "").strip()):
+        return False
+    names = rs._marker_names(doc_dir) or []
+    if rs._has_marker(names, "已公告.txt"):
+        return False
+    try:
+        import post_web_batch as pwb
+        return not any(pwb.posted_detail(doc_dir)) if doc_dir else True
+    except Exception:
+        return False                       # 查不出來就不給按,寧可多切一頁
+
+
 def rows_payload():
     """回清單。**每次都先把資料夾同步進審核表** —— 使用者不該為了看到新公文
     去記得跑 review_sheet.py（2026-07-29:收完文畫面沒變,就是卡在這）。
@@ -127,6 +145,7 @@ def rows_payload():
     except Exception as e:
         note = f"同步時出錯:{type(e).__name__}: {e}"
 
+    import announce_doc as ad
     out = []
     for r in rs.rows():
         d = _doc_dir(str(r["文號"]).strip())
@@ -140,6 +159,15 @@ def rows_payload():
             "張貼": r.get("張貼") or "",
             "目錄": d or "",
             "狀態": _status(r, d),
+            # 摘要頁那顆「擬辦 OK」:已送過陳核的(欄位會停在 OK)或自己辦掉的不給按。
+            "陳會OK": rs.is_approved(r.get("陳會")),
+            "可打OK": (not ad._is_sent(r, d)
+                       and (rs.is_approved(r.get("陳會"))
+                            or not str(r.get("陳會") or "").strip())),
+            # 同一頁的「公告 OK」:要有文案、還沒貼過、欄位是空白或 OK 才給按。
+            "張貼OK": rs.is_approved(r.get("張貼")),
+            "可打張貼OK": _can_mark_post(r, d),
+            "待查核": ad.STRAY_MARK in str(r.get("公告") or ""),
             # 辦完的公文歸「舊文」頁,不再佔著待辦清單。判斷規則見
             # review_sheet.is_archived(已存查 ＋ 不用公告或已張貼)。
             # 這裡只標記不過濾 —— 兩個分頁共用同一次 /api/rows,切分頁不必重讀。
@@ -759,6 +787,9 @@ class Job:
 
     _lock = threading.Lock()
     _busy = None                            # 目前占著 Chrome 的 Job
+    # 一鍵跑完（RunAll）正在串的時候，步驟與步驟之間有空檔 —— 那一瞬間沒有
+    # 任何 Job 在跑，單獨的按鈕會趁隙插進來。串接期間只放行它自己起的那幾支。
+    _chain = None
 
     def __init__(self, name, argv, hud=None, hud_label=None):
         self.name = name
@@ -768,13 +799,17 @@ class Job:
         self.proc = None
         self.lines = []
         self.exit = None
+        self.tee = None                     # 一鍵跑完借用時，印的東西也抄一份過去
 
     @property
     def running(self):
         return self.proc is not None and self.proc.poll() is None
 
-    def start(self):
+    def start(self, by_chain=False):
         with Job._lock:
+            chain = Job._chain
+            if chain is not None and chain.running and not by_chain:
+                return False, "「一鍵跑完」正在跑，等它結束再來"
             busy = Job._busy
             if busy is not None and busy.running:
                 return False, ("已經在跑了" if busy is self else
@@ -802,6 +837,8 @@ class Job:
             if s:
                 self.lines.append(s)
                 del self.lines[:-400]          # 只留最後 400 行,不要吃記憶體
+                if self.tee is not None:
+                    self.tee.append(s)
         self.exit = p.wait()
         self.lines.append(f"── 結束（代碼 {self.exit}）──")
 
@@ -853,8 +890,234 @@ WEB = Job("貼上校網", ["post_web_batch.py", "--go"],
 SELFN = Job("貼自訂公告", ["custom_notice.py", "--go"],
             hud="self", hud_label="貼上校網中…請不要動滑鼠")
 
+
+# ── 一鍵跑完 ───────────────────────────────────────────────────────────────
+#
+# 承辦人 2026-10-29:「先 B，至少少按四次」。把上面五支依序串起來，**判斷一樣
+# 只看審核表裡他打的 OK** —— 一鍵省的是「站在旁邊等它跑完再按下一顆」，
+# 不是省掉判斷。新收進來的公文這一輪只會進審核表，下一輪才可能被送出去。
+#
+# 每一步該擋的照擋，而且擋在「動手的那一刻」重算，不是只信開頭那張確認表:
+#   送陳核 —— 收文完再算一次，跟確認表上那幾份不一樣就整串停。
+#   存查   —— **不給人看清單**（承辦人:「存查其實不會看」），讀到就歸檔;
+#             但 archive_batch 自己的防呆（狀態對不上、--expect）照樣全開。
+#   公告   —— 只產「已陳核、還沒有文案」的，不重產、不蓋他改過的字。
+#             這一輪產的文案他還沒審，**這一輪不會被貼出去**。
+#   關 edoc —— 貼校網前必須關（同一個設定檔，見 chrome_in_the_way）。
+#             承辦人說跑完不會再用那個 Chrome，所以由程式關;沒東西要貼就不關。
+#   貼校網 —— 文號＋指紋要跟確認表上的完全一樣，差一個字就停。
+#
+# 任何一步結束碼不是 0、或檢查沒過，後面全部不跑。
+
+ALL_STEPS = ("收新公文", "送陳核", "存查", "產生公告文案", "關掉 edoc", "貼上校網")
+
+
+class Stop(Exception):
+    """一鍵跑完中途該停下來。訊息就是要給承辦人看的那句話。"""
+
+
+class RunAll:
+    """把五支 Job 串成一串跑。介面看它跟看一支 Job 一樣（running/status/stop）。"""
+
+    name = "一鍵跑完"
+
+    def __init__(self):
+        self.thread = None
+        self.lines = []
+        self.exit = None
+        self.step = 0                       # 正在跑第幾步（1 起算），0 = 還沒開始
+        self.current = None                 # 正在跑的那支 Job
+        self.stopped = False
+        self.send_nos = []
+        self.web_marks = {}
+
+    @property
+    def running(self):
+        return self.thread is not None and self.thread.is_alive()
+
+    def say(self, s):
+        self.lines.append(s)
+        del self.lines[:-2000]
+
+    def start(self, send_nos, web_marks):
+        with Job._lock:
+            if self.running:
+                return False, "已經在跑了"
+            busy = Job._busy
+            if busy is not None and busy.running:
+                return False, f"「{busy.name}」正在跑，等它結束再來"
+            self.lines, self.exit, self.step, self.stopped = [], None, 0, False
+            self.send_nos, self.web_marks = list(send_nos), dict(web_marks)
+            Job._chain = self
+            self.thread = threading.Thread(target=self._main, daemon=True)
+            self.thread.start()
+        return True, None
+
+    def stop(self):
+        if not self.running:
+            return False, "沒有正在執行的工作"
+        self.stopped = True
+        job = self.current
+        if job is not None and job.running:
+            job.stop()
+        self.say("── 已由使用者停止，後面的步驟都不跑 ──")
+        return True, None
+
+    def status(self, since=0):
+        return {"執行中": self.running, "起點": since,
+                "訊息": self.lines[since:], "總行數": len(self.lines),
+                "結束碼": self.exit, "步驟": self.step, "總步數": len(ALL_STEPS),
+                "步驟名": ALL_STEPS[self.step - 1] if self.step else ""}
+
+    # ── 內部 ──
+
+    def _main(self):
+        code = 0
+        try:
+            for i, fn in enumerate((self._prep, self._send, self._archive,
+                                    self._announce, self._close, self._web), 1):
+                if self.stopped:
+                    raise Stop("已由使用者停止")
+                self.step = i
+                self.say(f"▶ 第 {i}/{len(ALL_STEPS)} 步：{ALL_STEPS[i - 1]}")
+                fn()
+            self.say("✔ 六步都跑完了")
+        except Stop as e:
+            code = 1
+            self.say(f"⛔ 停在第 {self.step}/{len(ALL_STEPS)} 步：{e}")
+            self.say("   後面的步驟都沒有跑。")
+        except Exception as e:
+            code = 1
+            self.say(f"⛔ 第 {self.step} 步出錯：{type(e).__name__}: {e}")
+        finally:
+            self.current = None
+            self.exit = code
+
+    def _run(self, job):
+        """借一支 Job 來跑，等它結束，回結束碼。印的東西同步抄進這裡。"""
+        job.tee = self.lines
+        try:
+            ok, err = job.start(by_chain=True)
+            if not ok:
+                raise Stop(err)
+            self.current = job
+            while job.running or job.exit is None:
+                if job.proc is None:
+                    break
+                threading.Event().wait(0.5)
+            return job.exit
+        finally:
+            job.tee = None
+            self.current = None
+
+    def _must(self, job, what):
+        code = self._run(job)
+        if self.stopped:
+            raise Stop("已由使用者停止")
+        if code != 0:
+            raise Stop(f"{what}沒有正常結束（代碼 {code}），請看上面訊息")
+
+    def _prep(self):
+        self._must(PREP, "收文")
+
+    def _need_chrome(self):
+        cs = chrome_state()
+        if not cs["ok"]:
+            raise Stop(cs["說明"])
+
+    def _send(self):
+        if not self.send_nos:
+            self.say("   沒有打 OK 要送的公文，跳過")
+            return
+        self._need_chrome()
+        import post_draft_batch as pdb
+        now = [it["文號"] for it in pdb.plan()[0]]
+        if sorted(now) != sorted(self.send_nos):
+            raise Stop(f"要送陳核的清單變了（確認時 {len(self.send_nos)} 份，"
+                       f"現在 {len(now)} 份）—— 一份都沒送")
+        self._must(SEND, "送陳核")
+
+    def _archive(self):
+        self._need_chrome()
+        self._must(SCAN, "讀待結案清單")
+        p = scan_plan()
+        if p is None:
+            raise Stop("讀不到待結案清單")
+        nos = [it["文號"] for it in p["清單"]]
+        if not nos:
+            self.say("   待結案清單是空的，跳過")
+            return
+        if not p["可跑"]:
+            raise Stop(p["不可跑原因"])
+        ARCH.argv = ["archive_batch.py", "--go", "--expect=" + ",".join(nos)]
+        remember_arch_batch(p)
+        SCAN.lines = []
+        self._must(ARCH, "存查歸檔")
+
+    def _announce(self):
+        import announce_doc as ad
+        todo, _ = ad.plan(overwrite=False, sent_only=True)
+        nos = [it["文號"] for it in todo]
+        if not nos:
+            self.say("   沒有需要產文案的公文，跳過")
+            return
+        self.say(f"   要產 {len(nos)} 份（產完等你審，這一輪不會貼出去）")
+        ANNC.argv = ["announce_doc.py", "--sent-only", "--only", *nos]
+        self._must(ANNC, "產生公告文案")
+
+    def _close(self):
+        if not self.web_marks:
+            self.say("   沒有要貼校網的，edoc 留著不關")
+            return
+        import post_web_batch as pwb
+        if pwb.chrome_in_the_way() is None:
+            self.say("   edoc 那個 Chrome 本來就沒開")
+            return
+        from taipeion_login_selenium import _close_selenium_chrome_only
+        _close_selenium_chrome_only()
+        for _ in range(20):
+            if pwb.chrome_in_the_way() is None:
+                self.say("   已關掉")
+                return
+            threading.Event().wait(0.5)
+        raise Stop("edoc 那個 Chrome 關不掉，請手動關掉後再到「張貼」頁貼")
+
+    def _web(self):
+        if not self.web_marks:
+            self.say("   沒有打 OK 要貼的公告，跳過")
+            return
+        import post_web_batch as pwb
+        ready, _, _, warn = pwb.plan()
+        now = {it["文號"]: pwb.fingerprint(it) for it in ready}
+        if now != self.web_marks:
+            raise Stop("要貼校網的公告跟確認時不一樣了（份數或文字變了）—— 一份都沒貼")
+        if warn:
+            raise Stop(warn[0])
+        busy = pwb.chrome_in_the_way()
+        if busy:
+            raise Stop(busy)
+        WEB.argv = ["post_web_batch.py", "--go",
+                    "--expect=" + ",".join(f"{no}:{now[no]}" for no in sorted(now))]
+        self._must(WEB, "貼校網")
+
+
+RUNALL = RunAll()
+
+
+def all_payload():
+    """一鍵跑完的確認表:這次會送哪幾份陳核、會貼哪幾份公告（附全文）。
+
+    直接拿陳核頁、張貼頁算好的那兩堆 —— 判定不另寫一份。
+    存查不列:清單只在 edoc 上，登入前讀不到，而承辦人選擇不看。
+    """
+    send, note1 = send_payload()
+    web, note2 = web_payload()
+    return {"送陳核": send["可送"], "貼校網": web["可貼"],
+            "張貼警告": web["警告"]}, (note1 or note2)
+
+
 JOBS = {"prep": PREP, "send": SEND, "scan": SCAN, "archive": ARCH,
-        "announce": ANNC, "web": WEB, "self": SELFN}
+        "announce": ANNC, "web": WEB, "self": SELFN, "all": RUNALL}
 
 
 def self_payload():
@@ -920,6 +1183,15 @@ class Handler(BaseHTTPRequestHandler):
         if path == "/api/send/plan":
             try:
                 data, note = send_payload()
+                return self._json({"ok": True, **data, "訊息": note})
+            except FileNotFoundError:
+                return self._json({"ok": False,
+                                   "錯誤": "還沒有任何公文。請先按「收新公文」。"})
+            except Exception as e:
+                return self._json({"ok": False, "錯誤": f"{type(e).__name__}: {e}"})
+        if path == "/api/all/plan":
+            try:
+                data, note = all_payload()
                 return self._json({"ok": True, **data, "訊息": note})
             except FileNotFoundError:
                 return self._json({"ok": False,
@@ -1042,6 +1314,39 @@ class Handler(BaseHTTPRequestHandler):
             ok, err = SEND.start()
             return self._json({"ok": ok, "錯誤": err} if not ok
                               else {"ok": True, "筆數": len(now)})
+
+        if path == "/api/all/start":
+            # 一鍵跑完。會送陳核、會歸檔、會貼校網，三樣都收不回來。關卡:
+            #
+            #  1. 沒帶「確認」一律不動。
+            #  2. 確認表上的送陳核清單、貼校網清單（含指紋）要跟現算的一樣 ——
+            #     跟 /api/send/start、/api/web/start 同一套理由。
+            #  3. 有東西要貼但張貼那邊有警告（例如缺發布單位）就不放行:
+            #     不然會前面五步都跑完、到最後一步才停，那時已經關掉 edoc 了。
+            #
+            # 跑的途中每一步動手前還會再算一次（見 RunAll），這裡只擋畫面過期。
+            if not body.get("確認"):
+                return self._json({"ok": False, "錯誤": "缺少確認"}, 400)
+            seen_send = sorted(str(x).strip() for x in (body.get("送陳核") or []))
+            seen_web = {str(k).strip(): str(v or "")
+                        for k, v in (body.get("貼校網") or {}).items()}
+            try:
+                data, _ = all_payload()
+            except FileNotFoundError:
+                return self._json({"ok": False,
+                                   "錯誤": "還沒有任何公文。請先按「收新公文」。"})
+            except Exception as e:
+                return self._json({"ok": False, "錯誤": f"{type(e).__name__}: {e}"})
+            now_send = sorted(it["文號"] for it in data["送陳核"])
+            now_web = {it["文號"]: it["指紋"] for it in data["貼校網"]}
+            if seen_send != now_send or seen_web != now_web:
+                return self._json({"ok": False,
+                                   "錯誤": "清單或公告文字跟你剛才看到的不一樣了 —— "
+                                           "什麼都沒做，請重新按一次「一鍵跑完」再確認。"})
+            if now_web and data["張貼警告"]:
+                return self._json({"ok": False, "錯誤": data["張貼警告"][0]})
+            ok, err = RUNALL.start(now_send, now_web)
+            return self._json({"ok": ok, "錯誤": err} if not ok else {"ok": True})
 
         if path == "/api/scan/start":
             # 讀清單本身不歸檔，但會點左側「待結案」—— 是在操作 Chrome，

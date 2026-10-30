@@ -274,6 +274,9 @@
   <span id="count" class="msg"></span>
   <span class="grow"></span>
   <span id="msg" class="msg"></span>
+  <!-- 一鍵跑完（2026-10-29「先 B，至少少按四次」）:把收文、送陳核、存查、
+       產文案、貼校網串成一串。判斷照舊只看審核表的 OK，按下去先跳確認表。 -->
+  <button id="runall" class="solid">一鍵跑完 <span class="card-need">需插卡</span></button>
   <button id="prep">收新公文 <span class="card-need">需插卡</span></button>
   <!-- 送出鈕釘在這裡（不隨內容滾動）。2026-08-05 承辦人回報:原本只放在清單
        最下面，畫面上唯一看得到的按鈕是每筆的「不送了」,他下意識以為那顆就是
@@ -383,6 +386,27 @@
   </div>
 </div>
 
+<div id="allask" class="mask" hidden>
+  <div class="dlg wide">
+    <h2>要一次跑完這六步嗎？</h2>
+    <ol>
+      <li><b>收新公文</b> —— 簽收＋下載＋摘要。新收的只進審核表，這一輪不會被送出去</li>
+      <li><b id="allsendn">送陳核</b> —— 陳會欄打 OK 的</li>
+      <li><b>存查</b> —— 讀待結案清單，有就直接歸檔（狀態對不上會整批停）</li>
+      <li><b>產生公告文案</b> —— 已陳核、還沒有文案的。產完等你審，這一輪不會貼</li>
+      <li><b>關掉 edoc</b> —— 貼校網前一定要關（沒東西要貼就不關）</li>
+      <li><b id="allwebn">貼上校網</b> —— 張貼欄打 OK 的</li>
+    </ol>
+    <div id="allitems"></div>
+    <p class="danger"><b>送陳核、存查、貼校網都收不回來。</b>任何一步出錯，後面全部不跑。</p>
+    <p class="warnbox">前三步會操作 Chrome，<b>請不要動滑鼠鍵盤</b>。憑證要插著、螢幕不能鎖。</p>
+    <div class="dlgfoot">
+      <button id="allno">再想想</button>
+      <button id="allyes" class="risk">確定，跑完它</button>
+    </div>
+  </div>
+</div>
+
 <div id="webask" class="mask" hidden>
   <div class="dlg wide">
     <h2>確定要把這些公告貼上校網嗎？</h2>
@@ -405,7 +429,7 @@
 </div>
 
 <script>
-let ROWS = [], CUR = null, timer = null, TAB = "live";
+let ROWS = [], CUR = null, TAB = "live";
 
 // 「摘要」只看還沒辦完的,「舊文」只看辦完的。辦完 = 已存查 ＋（不用公告 or 已張貼）,
 // 由後端 review_sheet.is_archived 算好、放在每列的 舊文 欄位。
@@ -523,6 +547,67 @@ function files(detail, r) {
   </div>`;
 }
 
+// 「擬辦 OK」「公告 OK」給不給按、現在是不是 OK,都由後端 /api/rows 算
+// （可打OK／陳會OK、可打張貼OK／張貼OK）—— 送過、貼過的欄位會停在 OK,不能讓人清掉。
+const sendable = r => !!r.可打OK;
+const postable = r => !!r.可打張貼OK;
+
+// 摘要頁兩顆 OK 共用:按一下在審核表那一欄寫 OK,再按一下清回空白。
+// 字還沒自動存就先存 —— 不然送出去／貼出去的會是改之前的字。
+function gateToggle(r, o) {
+  const b = el(o.btn);
+  if (!b) return;
+  let ok = !!r[o.col + "OK"];
+  const paint = () => {
+    b.className = ok ? "" : "solid";
+    b.textContent = ok ? "✕ 先不" + o.verb : o.label;
+    const m = el(o.msg);
+    m.className = "msg" + (ok ? " ok" : "");
+    m.textContent = ok ? o.onText : `等於在審核表「${o.col}」欄打 OK`;
+    el(o.txt).textContent = ok ? "OK" : "（空）";
+  };
+  paint();
+  b.onclick = async () => {
+    const m = el(o.msg), ta = el(o.ta);
+    if (!ok && !ta.value.trim()) {
+      m.className = "msg err"; m.textContent = "內容是空的，寫好再按"; return;
+    }
+    b.disabled = true;
+    m.className = "msg"; m.textContent = "存…";
+    try {
+      if (el(o.saved).textContent === "未存…") {
+        clearTimeout(ta._t);
+        await save(r.文號, ta.value, o.field, o.saved);
+        if (el(o.saved).className.includes("err")) throw new Error("內容沒存進去");
+      }
+      const want = ok ? "" : "OK";
+      const j = await (await fetch("/api/save", {
+        method: "POST", body: JSON.stringify({ 文號: r.文號, [o.col]: want })
+      })).json();
+      if (!j.ok) throw new Error(j.錯誤);
+      ok = !ok;
+      const row = ROWS.find(x => x.文號 === r.文號);
+      if (row) { row[o.col] = want; row[o.col + "OK"] = ok; }
+      paint();
+    } catch (e) {
+      m.className = "msg err"; m.textContent = "存不進去：" + (e.message || e);
+    }
+    b.disabled = false;
+  };
+}
+
+// 停 1 秒自動存（擬辦、公告文案共用）。
+function autoSave(r, taId, field, savedId) {
+  const ta = el(taId);
+  if (!ta) return;
+  ta.oninput = () => {
+    clearTimeout(ta._t);
+    el(savedId).className = "msg";
+    el(savedId).textContent = "未存…";
+    ta._t = setTimeout(() => save(r.文號, ta.value, field, savedId), 1000);
+  };
+}
+
 function drawDetail(r, detail) {
   const notes = ((detail && detail.提醒) || [])
     .map(n => `<div class="note">⚠️ ${esc(n.文字)}</div>`).join("");
@@ -543,10 +628,22 @@ function drawDetail(r, detail) {
       <div class="foot">
         <span id="saved" class="msg"></span>
       </div>
+      ${TAB === "old" || !sendable(r) ? "" : `<div class="foot" style="margin-top:8px">
+        <button id="sendok"></button><span id="sendokmsg" class="msg"></span></div>`}
     </div>
+    ${TAB === "old" || !String(r.公告 || "").trim() ? "" : `
+    <div class="box" style="border-color:#b9d4c9">
+      <p class="fld">公告文案 <span>貼上校網的字，可以直接改，停 1 秒自動存</span></p>
+      <textarea id="ancdraft" rows="8">${esc(r.公告)}</textarea>
+      ${r.待查核 ? `<div class="note" style="margin:7px 0 0">⚠️ 文案裡有<b>來文找不到的網址</b>
+        （文末標了「待查核」）。確認過就把那段標註刪掉，不然張貼時會被擋下。</div>` : ""}
+      <div class="foot"><span id="ancsaved" class="msg"></span></div>
+      ${postable(r) ? `<div class="foot" style="margin-top:8px">
+        <button id="postok"></button><span id="postokmsg" class="msg"></span></div>` : ""}
+    </div>`}
     <div class="box">
-      <p class="fld">這筆的進度 <span>陳會 ${esc(r.陳會) || "（空）"}　·　張貼 ${
-        esc(r.張貼) || "（空）"}</span></p>
+      <p class="fld">這筆的進度 <span>陳會 <b id="gatetxt">${esc(r.陳會) || "（空）"}</b>　·　張貼 <b id="posttxt">${
+        esc(r.張貼) || "（空）"}</b></span></p>
       <div class="foot">
         ${TAB === "old"
           ? `<button id="undone">放回待辦</button>`
@@ -557,13 +654,8 @@ function drawDetail(r, detail) {
       </div>
     </div>
     ${files(detail, r)}`;
-  const ta = el("draft");
-  ta.oninput = () => {
-    clearTimeout(timer);
-    el("saved").className = "msg";
-    el("saved").textContent = "未存…";
-    timer = setTimeout(() => save(r.文號, ta.value), 1000);
-  };
+  autoSave(r, "draft", "擬辦", "saved");
+  autoSave(r, "ancdraft", "公告", "ancsaved");
   // 「我辦完了」／「放回待辦」—— 就是把「陳會」「張貼」兩欄一起標成已辦或清空。
   // 判定規則在 review_sheet.is_archived:兩關都已辦 = 你宣告辦完 → 進舊文。
   const mark = async (val, doing) => {
@@ -586,6 +678,18 @@ function drawDetail(r, detail) {
       say(was === "old" ? "已放回待辦。" : "已移到「舊文」。", "ok");
     }
   };
+  // 「擬辦 OK」／「公告 OK」—— 跟陳核頁「＋ 加入送出」、張貼頁的加入是同一件事:
+  // 寫「陳會」／「張貼」欄 OK ↔ 空白。2026-10-30 番茄:看完擬辦、文案還要切兩頁才能
+  // 打 OK。能不能送、能不能貼照舊由那兩頁與一鍵跑完的確認表判斷,這裡只負責打勾。
+  gateToggle(r, { btn: "sendok", msg: "sendokmsg", txt: "gatetxt", ta: "draft",
+    saved: "saved", field: "擬辦", col: "陳會", verb: "送",
+    label: "✓ 擬辦 OK，要送陳核",
+    onText: "已排進陳核：下次「一鍵跑完」或陳核頁會送出" });
+  gateToggle(r, { btn: "postok", msg: "postokmsg", txt: "posttxt", ta: "ancdraft",
+    saved: "ancsaved", field: "公告", col: "張貼", verb: "貼",
+    label: "✓ 公告 OK，要貼校網",
+    onText: "已排進張貼：下次「一鍵跑完」或張貼頁會貼上校網" });
+
   const dn = el("done");
   if (dn) dn.onclick = () => mark("已辦", "標記中…");
   const un = el("undone");
@@ -607,16 +711,16 @@ function drawDetail(r, detail) {
   };
 }
 
-async function save(doc, text) {
+async function save(doc, text, field = "擬辦", savedId = "saved") {
   const r = await (await fetch("/api/save", {
-    method: "POST", body: JSON.stringify({ 文號: doc, 擬辦: text })
+    method: "POST", body: JSON.stringify({ 文號: doc, [field]: text })
   })).json();
-  const s = el("saved");
+  const s = el(savedId);
   if (!s) return;
   if (r.ok) {
     s.className = "msg ok"; s.textContent = "已存";
     const row = ROWS.find(x => x.文號 === doc);
-    if (row) row.擬辦 = text;
+    if (row) row[field] = text;
   } else {
     s.className = "msg err"; s.textContent = r.錯誤;
   }
@@ -629,16 +733,20 @@ async function pick(r) {
   const d = await (await fetch("/api/detail/" + encodeURIComponent(r.文號))).json();
   if (CUR !== r.文號 || !d.ok) return;
   // 提醒算完要重畫,但**不能蓋掉使用者已經打的字**（第一次畫完到這裡有幾百毫秒,
-  // 手快的人早就開始改擬辦了）。先接住現況再重畫。
-  const ta = el("draft");
-  const typed = ta ? ta.value : null;
-  const focused = ta && document.activeElement === ta;
-  const caret = focused ? ta.selectionStart : null;
-  drawDetail({ ...r, 擬辦: typed !== null ? typed : r.擬辦 }, d.detail);
-  if (focused) {
-    const ta2 = el("draft");
+  // 手快的人早就開始改擬辦／文案了）。先接住現況再重畫。
+  const keep = {}, act = document.activeElement;
+  let focus = null;
+  for (const [id, f] of [["draft", "擬辦"], ["ancdraft", "公告"]]) {
+    const ta = el(id);
+    if (!ta) continue;
+    keep[f] = ta.value;
+    if (act === ta) focus = { id, caret: ta.selectionStart };
+  }
+  drawDetail({ ...r, ...keep }, d.detail);
+  if (focus) {
+    const ta2 = el(focus.id);
     ta2.focus();
-    ta2.setSelectionRange(caret, caret);
+    ta2.setSelectionRange(focus.caret, focus.caret);
   }
 }
 
@@ -2255,7 +2363,9 @@ const JOBTXT = {
   // 張貼不碰 edoc、不用插卡，但它自己開的 Chrome 正在填校網表單 ——
   // 那段一樣不能動滑鼠，所以這句話是真的。
   web: { run: "貼上校網中…請不要動滑鼠", ok: "張貼結束",
-         stop: "中止（目前這筆可能停在一半，貼出去的不會收回）" },
+         stop: "中止（目前這筆可能停在一半，貼出去的不會收回）" },  // 一鍵跑完:標題列會換成「第 n/6 步：xxx」（見 tick）。
+  all: { run: "一鍵跑完中…請不要動滑鼠", ok: "六步都跑完了",
+         stop: "中止（目前這一步可能停在一半，後面的都不跑）" },
 };
 
 const show = (id, on) => el(id).hidden = !on;
@@ -2270,6 +2380,7 @@ function watch(job) {
   show("preppanel", true);
   show("prepstop", true);
   el("prep").disabled = true;
+  el("runall").disabled = true;
   // 跑的時候所有會起另一支工作的鈕都要按不下去（後端也互斥，這裡是不要讓人白按）。
   // 公告那幾顆也算:它雖然不碰 Chrome，但跟收文一樣會寫審核表，同樣被互斥擋掉。
   ["dosend", "doarch", "doscan", "rescan", "doanc", "doweb"].forEach(id => {
@@ -2290,6 +2401,57 @@ function watch(job) {
 }
 
 el("prep").onclick = () => show("ask", true);
+
+// ── 一鍵跑完 ──────────────────────────────────────────────────────────────
+//
+// 確認表列的就是陳核頁「可送」、張貼頁「可貼」那兩堆（後端同一份判定），
+// 全文收在可展開的區塊裡。按確定時把文號＋指紋帶回去，後端對不上就不跑。
+let ALLPLAN = null;
+
+el("runall").onclick = async () => {
+  say("讀取中…");
+  let j;
+  try {
+    const r = await fetch("/api/all/plan");
+    // 網頁每次從磁碟讀新的，伺服器卻可能還是開機時的舊程式 —— 那時它不認得這個網址。
+    if (r.status === 404) return say("背後的程式是舊的：關掉黑色視窗、重開 啟動.bat 再按一次", "err");
+    j = await r.json();
+  }
+  catch (e) { return say("讀不到清單：" + e, "err"); }
+  if (!j.ok) return say(j.錯誤, "err");
+  say(j.訊息 || "");
+  ALLPLAN = j;
+  const go = j.送陳核 || [], web = j.貼校網 || [];
+  el("allsendn").textContent = go.length ? `送陳核 ${go.length} 份` : "送陳核（這次沒有，跳過）";
+  el("allwebn").textContent = web.length ? `貼上校網 ${web.length} 份` : "貼上校網（這次沒有，跳過）";
+  el("allitems").innerHTML =
+    (go.length ? `<details><summary>▸ 看要送陳核的 ${go.length} 份（擬辦全文）</summary>${
+      go.map(it => sendItem(it, "goask")).join("")}</details>` : "") +
+    (web.length ? `<details><summary>▸ 看要貼校網的 ${web.length} 份（公告全文）</summary>${
+      web.map(it => webItem(it, "goask")).join("")}</details>` : "") +
+    (web.length && (j.張貼警告 || []).length
+      ? `<p class="why">✖ ${esc(j.張貼警告[0])}（這個沒解決之前不能跑）</p>` : "");
+  el("allyes").disabled = !!(web.length && (j.張貼警告 || []).length);
+  show("allask", true);
+};
+
+el("allno").onclick = () => show("allask", false);
+
+el("allyes").onclick = async () => {
+  show("allask", false);
+  const p = ALLPLAN || {};
+  const j = await (await fetch("/api/all/start", {
+    method: "POST",
+    body: JSON.stringify({
+      確認: true,
+      送陳核: (p.送陳核 || []).map(it => it.文號),
+      貼校網: Object.fromEntries((p.貼校網 || []).map(it => [it.文號, it.指紋]))
+    })
+  })).json();
+  if (!j.ok) return say(j.錯誤, "err");
+  say("一鍵跑完開始");
+  watch("all");
+};
 el("askno").onclick = () => show("ask", false);
 
 el("askyes").onclick = async () => {
@@ -2320,13 +2482,20 @@ async function tick() {
     box.scrollTop = box.scrollHeight;
     seen = j.總行數;
   }
+  // 一鍵跑完:用「第 n/6 步」讓人看得出跑到哪了 —— 會動的分母。
+  if (JOB === "all" && j.執行中 && j.步驟)
+    el("prepstate").textContent =
+      `第 ${j.步驟}/${j.總步數} 步：${j.步驟名}…請不要動滑鼠`;
   if (!j.執行中) {
     clearInterval(poll); poll = null;
     el("prep").disabled = false;
+    el("runall").disabled = false;
     show("prepstop", false);
     const good = j.結束碼 === 0;
     const txt = JOBTXT[JOB];
-    el("prepstate").textContent = good ? txt.ok : "已結束（有中斷或錯誤，請看上面訊息）";
+    el("prepstate").textContent = good ? txt.ok
+      : JOB === "all" ? `停在第 ${j.步驟}/${j.總步數} 步：${j.步驟名}（原因看上面最後幾行）`
+      : "已結束（有中斷或錯誤，請看上面訊息）";
     // 跑完清單一定變了（收文多幾筆／送出的那幾筆有了已陳核.txt），重讀。
     // 存查那邊尤其要重讀:歸檔一跑，後端就把上次讀到的待結案清單作廢了，
     // 免得有人拿過期的清單再按一次。
@@ -2355,7 +2524,7 @@ el("reload").onclick = () => TAB === "arch" ? loadArch()
 load();
 // 萬一頁面重整時工作還在跑,接回去繼續看。六支都要問 —— 重整那一刻正在跑的
 // 可能是送陳核或歸檔，接錯支就會盯著一個沒在動的面板。
-["prep", "send", "scan", "archive", "announce", "web", "self"].forEach(job =>
+["all", "prep", "send", "scan", "archive", "announce", "web", "self"].forEach(job =>
   fetch(`/api/${job}/status?since=0`).then(r => r.json())
     .then(j => { if (j.執行中) watch(job); }).catch(() => {}));
 </script>

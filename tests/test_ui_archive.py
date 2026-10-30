@@ -269,9 +269,12 @@ def test_jobs_share_one_lock():
     張貼與自訂公告各自開一個 Chrome（同一個 Selenium 設定檔），照樣不能並行。
     沒登記在 JOBS 的話，/api/<工作>/status 與 /stop 兩條泛用路由就管不到它，
     畫面上會看不到進度、也按不了停止。
+
+    「一鍵跑完」（RUNALL）不是 Job，是借上面那幾支串著跑;它的互斥另有測試
+    （test_ui_all.py），這裡只確認它也登記了。
     """
-    assert {ui.PREP, ui.SEND, ui.SCAN, ui.ARCH, ui.ANNC, ui.WEB, ui.SELFN} \
-        == set(ui.JOBS.values())
+    assert {ui.PREP, ui.SEND, ui.SCAN, ui.ARCH, ui.ANNC, ui.WEB, ui.SELFN,
+            ui.RUNALL} == set(ui.JOBS.values())
 
 
 # ── 浮窗 ───────────────────────────────────────────────────────────────────
