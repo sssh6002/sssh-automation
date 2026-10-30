@@ -54,8 +54,8 @@ _TITLE_RE = re.compile(r"^【.+?】")
 
 def _should_announce(doc_dir):
     """沿用校網張貼那支的判斷,不要另立一套標準。"""
-    from document_closure.document_closure_post_web import _parse_summary, _should_post
-    return _should_post(_parse_summary(doc_dir))
+    from document_closure.document_closure_post_web import _should_post
+    return _should_post(rs.parse_summary(doc_dir))
 
 
 def _is_sent(row, doc_dir):

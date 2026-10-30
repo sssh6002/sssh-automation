@@ -234,7 +234,7 @@ def evaluate(row):
     不另立標準 —— 兩套規則遲早分岔，而最壞的方向是「畫面說會擋、其實貼出去了」。
     """
     from document_closure.document_closure_post_web import (
-        _already_announced, _parse_summary, _should_post)
+        _already_announced, _should_post)
 
     no = str(row["文號"]).strip()
     text = str(row.get("公告") or "").strip()
@@ -261,7 +261,7 @@ def evaluate(row):
     if not title or not body:
         return stop("文案格式不對（第一行要是【類別】標題，底下才是內文）")
 
-    summary = _parse_summary(d)
+    summary = rs.parse_summary(d)
     if not _should_post(summary):
         return stop("擬辦不是要公告（承辦文字沒有「公佈周知／於官網公告」）")
     # ⚠️ `_already_announced`（原作者那支）只翻公文夾「目前」所在那個工作區根目錄
@@ -365,7 +365,8 @@ def announcement_as_summary(texts):
     real = pw._parse_summary
 
     def patched(extract_dir):
-        s = real(extract_dir)
+        # 原作者的貼文迴圈會一份份讀，壞掉的總結檔不能把整趟貼文拖垮。
+        s = rs.parse_summary(extract_dir, real)
         if not s:
             return s
         text = texts.get(pw._doc_no_of(extract_dir))

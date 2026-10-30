@@ -81,6 +81,24 @@ def _read_first(pattern_dir, pattern):
         return None
 
 
+def parse_summary(doc_dir, reader=None):
+    """原作者 `_parse_summary` 的保險版：總結.md 壞掉就當作沒有總結。
+
+    原作者那支只接 OSError，檔案在磁碟上壞掉（2026-10-30 同一份 MWAA1156010961
+    的總結.md 變成 NTFS 索引資料）會丟 UnicodeDecodeError，一鍵跑完因此停在
+    產公告文案。沒有總結 → `_should_post` 回 False → 不公告，是安全的那一邊。
+    reader — 要包的那一支，預設是原作者的（post_web_batch 替換時傳原本那支進來）。
+    """
+    if reader is None:
+        from document_closure import document_closure_post_web as pw
+        reader = pw._parse_summary
+    try:
+        return reader(doc_dir)
+    except UnicodeDecodeError:
+        print(f"[review_sheet] ⚠ 總結檔壞掉、讀不出文字，當作沒有總結（不公告）:{doc_dir}")
+        return None
+
+
 def _extract_explanation(content_txt):
     """抽 內容.txt 的「說明：」段落(到「附件：」或檔尾為止),原文不改。
 
@@ -417,9 +435,8 @@ def _posting_settled(row, doc_dir, names):
     except Exception:
         pass
     try:
-        from document_closure.document_closure_post_web import (
-            _parse_summary, _should_post)
-        return not _should_post(_parse_summary(doc_dir))
+        from document_closure.document_closure_post_web import _should_post
+        return not _should_post(parse_summary(doc_dir))
     except Exception:
         return False
 

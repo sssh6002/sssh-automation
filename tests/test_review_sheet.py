@@ -375,3 +375,11 @@ def test_read_first_survives_corrupt_file(tmp_path, capsys):
     (tmp_path / "1_2內容.txt").write_bytes(b"\xbb@x[0\x92g\xcd")
     assert rs._read_first(str(tmp_path), "*內容.txt") is None
     assert "1_2內容.txt" in capsys.readouterr().out
+
+
+def test_parse_summary_survives_corrupt_file(tmp_path, capsys):
+    """2026-10-30:同一份公文的 總結.md 也壞了,一鍵跑完停在產公告文案。
+    原作者的 `_parse_summary` 只接 OSError —— 壞檔要當作沒有總結（= 不公告）。"""
+    (tmp_path / "1_2總結.gemini.md").write_bytes(b"INDX(\x00\t\x00\xbfY\x1f\xce")
+    assert rs.parse_summary(str(tmp_path)) is None
+    assert "總結檔壞掉" in capsys.readouterr().out

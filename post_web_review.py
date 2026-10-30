@@ -47,10 +47,11 @@ def _iter_candidate_dirs():
 def _scan_candidates():
     """掃出「該公告且尚未公告」的公文目錄。回 list of (dir, summary)。"""
     from document_closure.document_closure_post_web import (
-        _parse_summary, _should_post, _already_announced)
+        _should_post, _already_announced)
+    from review_sheet import parse_summary
     cands = []
     for d in _iter_candidate_dirs():
-        summary = _parse_summary(d)
+        summary = parse_summary(d)
         if not _should_post(summary):
             continue
         if _already_announced(d):
@@ -132,7 +133,7 @@ def run_post_web_review():
         return
 
     print(f"[post_web_review] 找到 {len(cands)} 筆待公告公文,逐筆確認:")
-    from document_closure.document_closure_post_web import _parse_summary
+    from review_sheet import parse_summary
     confirmed = []
     total = len(cands)
     for i, (d, summary) in enumerate(cands, 1):
@@ -142,7 +143,7 @@ def run_post_web_review():
             if ans == "e":
                 _open_summary_for_edit(d)
                 input("  編輯存檔後按 Enter 重新讀取...")
-                summary = _parse_summary(d) or summary
+                summary = parse_summary(d) or summary
                 continue
             if ans == "y":
                 confirmed.append((d, summary))

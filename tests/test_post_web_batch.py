@@ -338,6 +338,21 @@ def test_summary_swap_only_touches_title_and_body():
         pw._parse_summary = real
 
 
+def test_summary_swap_survives_corrupt_summary():
+    """原作者的貼文迴圈會讀到換過的那支 —— 壞掉的總結檔不能把整趟貼文拖垮。"""
+    from document_closure import document_closure_post_web as pw
+    real = pw._parse_summary
+
+    def broken(d):
+        raise UnicodeDecodeError("utf-8", b"\xbf", 0, 1, "invalid start byte")
+    pw._parse_summary = broken
+    try:
+        with pwb.announcement_as_summary({"MWAA0001": TEXT}):
+            assert pw._parse_summary("壞掉的目錄") is None
+    finally:
+        pw._parse_summary = real
+
+
 def test_summary_swap_restores_even_on_error():
     from document_closure import document_closure_post_web as pw
     real = pw._parse_summary

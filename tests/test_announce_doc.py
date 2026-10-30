@@ -243,3 +243,9 @@ def test_content_of_survives_corrupt_file(tmp_path):
     """壞掉的 內容.txt 當作讀不到,不要讓整批公告文案當掉（2026-10-29 實機）。"""
     (tmp_path / "1_2內容.txt").write_bytes(b"INDX(\x00\xbb\xff")
     assert ad._content_of(str(tmp_path)) is None
+
+
+def test_should_announce_survives_corrupt_summary(tmp_path):
+    """壞掉的 總結.md 當作不公告,不要讓一鍵跑完停在產文案（2026-10-30 實機）。"""
+    (tmp_path / "1_2總結.gemini.md").write_bytes(b"INDX(\x00\t\x00\xbfY\x1f\xce")
+    assert ad._should_announce(str(tmp_path)) is False
