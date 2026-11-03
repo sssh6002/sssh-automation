@@ -212,7 +212,7 @@ CLAUDE_PROBE_TIMEOUT = 60                   # 秒;登入的話通常 5～15 秒�
 _PROBE_PROMPT = "回四個字:可以用了"
 
 
-def claude_login_state():
+def claude_login_state(model=None, effort=None):
     """真的叫一次 `claude -p`，回 (狀態, 訊息)。
     狀態:"ok" / "nologin"（命令在但沒登入）/ "missing"（沒這個命令）/ "fail"。
 
@@ -228,14 +228,23 @@ def claude_login_state():
 
     cwd 用暫存目錄:比照 summarize_doc，避免 claude 載到本專案的 CLAUDE.md
     （那裡有「回應末尾加引言區塊」之類規則，會混進總結內容）。
+
+    model／effort 要跟摘要那支（summarize_claude_model／effort）一樣:2026-11-03
+    全域預設是 Fable 5.1（要另計額度），這裡沒帶 --model 就報「requires usage
+    credits」，摘要釘的 sonnet 其實好好的 —— 健檢反而成了假警報。
     """
     exe = shutil.which("claude")
     if not exe:
         return "missing", ""
+    argv = [exe, "-p", "--output-format", "json"]
+    if model:
+        argv += ["--model", model]
+    if effort:
+        argv += ["--effort", effort]
     try:
         with tempfile.TemporaryDirectory(prefix="doctor_claude_") as td:
             r = subprocess.run(
-                [exe, "-p", "--output-format", "json"],
+                argv,
                 input=_PROBE_PROMPT, capture_output=True, text=True,
                 encoding="utf-8", errors="replace",
                 timeout=CLAUDE_PROBE_TIMEOUT, cwd=td)
@@ -269,7 +278,8 @@ def check_llm():
     if "claude" not in order:
         print("      設定裡的摘要順序沒有 claude 那一棒，跳過這項檢查。")
         return
-    state, msg = claude_login_state()
+    state, msg = claude_login_state(sd._read_config("summarize_claude_model"),
+                                    sd._read_config("summarize_claude_effort"))
     if state == "missing":
         print("      這台沒有 claude 這個命令（上面 env.env 那節已經講怎麼辦）。")
     elif state == "ok":

@@ -233,13 +233,47 @@ def test_not_logged_in_is_a_must_fix(monkeypatch, capsys):
     assert "不用重收" in out
 
 
+def test_probe_uses_the_same_model_as_summaries(monkeypatch):
+    """2026-11-03:全域預設是 Fable 5.1（要另計額度），doctor 沒帶 --model 就跟著
+    全域走，報「Fable 5.1 requires usage credits」；摘要那支釘了 sonnet，其實好好的。
+    健檢要測的是「摘要叫得動嗎」，所以要跟摘要用同一個模型。"""
+    import summarize_doc as sd
+    monkeypatch.setattr(sd, "_get_backend_order", lambda: ["claude"])
+    monkeypatch.setitem(sd._CONFIG_OVERRIDE, "summarize_claude_model", "sonnet")
+    monkeypatch.setitem(sd._CONFIG_OVERRIDE, "summarize_claude_effort", "low")
+    seen = []
+    monkeypatch.setattr(doctor.shutil, "which", lambda n: r"C:\fake\claude.exe")
+    monkeypatch.setattr(doctor.subprocess, "run", lambda argv, **k: seen.append(argv)
+                        or _R(stdout='{"is_error":false,"result":"可以用了"}'))
+    doctor.check_llm()
+    argv = seen[0]
+    assert argv[argv.index("--model") + 1] == "sonnet"
+    assert argv[argv.index("--effort") + 1] == "low"
+    assert doctor.BAD == []
+
+
+def test_probe_follows_global_default_when_model_not_pinned(monkeypatch):
+    """沒釘模型時摘要跟著全域預設走，健檢也一樣 —— 不能自己挑一個別的。"""
+    import summarize_doc as sd
+    monkeypatch.setattr(sd, "_get_backend_order", lambda: ["claude"])
+    monkeypatch.setitem(sd._CONFIG_OVERRIDE, "summarize_claude_model", "")
+    monkeypatch.setitem(sd._CONFIG_OVERRIDE, "summarize_claude_effort", "")
+    seen = []
+    monkeypatch.setattr(doctor.shutil, "which", lambda n: r"C:\fake\claude.exe")
+    monkeypatch.setattr(doctor.subprocess, "run", lambda argv, **k: seen.append(argv)
+                        or _R(stdout='{"is_error":false,"result":"可以用了"}'))
+    doctor.check_llm()
+    assert "--model" not in seen[0]
+    assert "--effort" not in seen[0]
+
+
 def test_probe_is_skipped_when_claude_not_in_order(monkeypatch, capsys):
     """設定裡沒用 claude 那一棒就不該花時間（也不該花錢）叫它。"""
     import summarize_doc as sd
     monkeypatch.setattr(sd, "_get_backend_order", lambda: ["aistudio"])
     called = []
     monkeypatch.setattr(doctor, "claude_login_state",
-                        lambda: called.append(1) or ("ok", ""))
+                        lambda *a: called.append(1) or ("ok", ""))
     doctor.check_llm()
     assert called == []
     assert doctor.BAD == []
