@@ -133,3 +133,46 @@ def test_roc_year_not_mistaken_for_class():
 def test_real_class_and_name_still_caught():
     assert has_pii("三年五班王小明") is True
     assert has_pii("本校211吳承翰同學") is True
+
+
+# ── 公文頭的來文單位聯絡手機(2026-11-05 實測誤判 MWAA1156011463)──────────────
+# 小型協會常只留手機當公務聯絡電話。發文機關的「承辦人／電話」欄位在「受文者」
+# 之前,那是公務聯絡資訊,不是個資。只放過公文頭;說明段、附件裡的手機照擋。
+
+HEADER_WITH_MOBILE = (
+    "中華民國資訊聯盟協進會 函\n"
+    "地址：100台北巿中正區忠孝西路50號18樓\n"
+    "之11\n"
+    "承辦人：中華民國資訊聯盟協進會\n"
+    "電話：0933994032\n"
+    "電子信箱：louk_chi@isaroc.org\n"
+    "受文者：臺北市立松山高級中學\n"
+    "發文日期：中華民國115年11月4日\n"
+)
+
+
+def test_sender_mobile_in_letterhead_not_flagged():
+    assert has_pii(HEADER_WITH_MOBILE) is False
+
+
+@pytest.mark.parametrize("label", ["電話", "聯絡電話", "手機", "行動電話", "傳真"])
+def test_letterhead_phone_labels_not_flagged(label):
+    text = f"承辦人：王小明\n{label}：0912-345-678\n電子信箱：a@b.org\n受文者：本校\n"
+    assert has_pii(text) is False, label
+
+
+def test_mobile_in_body_after_letterhead_still_flagged():
+    text = HEADER_WITH_MOBILE + "主旨：請協助轉知。\n說明：\n一、學生家長聯絡電話：0937-567-677。\n"
+    assert "手機號碼" in [h[0] for h in scan_pii(text)]
+
+
+def test_mobile_far_above_recipient_still_flagged():
+    """離「受文者」太遠就不算公文頭(例如前一份附件尾巴的手機)。"""
+    text = "聯絡電話：0937-567-677\n" + "內文一行\n" * 10 + "受文者：本校\n"
+    assert "手機號碼" in [h[0] for h in scan_pii(text)]
+
+
+def test_unlabeled_mobile_near_recipient_still_flagged():
+    """沒有電話欄位標籤的手機,就算靠近受文者也照擋。"""
+    text = "王小明 0937-567-677\n受文者：本校\n"
+    assert "手機號碼" in [h[0] for h in scan_pii(text)]

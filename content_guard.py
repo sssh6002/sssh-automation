@@ -69,6 +69,32 @@ _PATTERNS = [
     ("弱勢身分", re.compile(r"(?:低收入戶|中低收入戶|清寒證明|特殊境遇)"), "身分別"),
 ]
 
+# ── 公文頭的發文機關聯絡電話 ───────────────────────────────────────────────
+# 2026-11-05 實測誤判 MWAA1156011463:小型協會在公文頭只留手機
+# (「承辦人：○○協會／電話：0933…／電子信箱：…／受文者：本校」)。
+# 那是發文機關的公務聯絡電話,不是個資。只放過「受文者」上方幾行內、
+# 有電話類欄位標籤的那一行;說明段、附件、沒標籤的手機照擋。
+_LETTERHEAD_PHONE_LINE = re.compile(r"^\s*(?:聯絡)?(?:電話|手機|行動電話|傳真)\s*[:：]")
+_RECIPIENT_LINE = re.compile(r"^\s*受\s*文\s*者\s*[:：]")
+_LETTERHEAD_REACH = 6   # 電話行到受文者之間最多隔幾行(實務是傳真、電子信箱 1~3 行)
+
+
+def _letterhead_phone_spans(text):
+    """回公文頭電話行在 text 中的 (start, end) 區間清單。"""
+    lines = text.splitlines(keepends=True)
+    offsets, pos = [], 0
+    for ln in lines:
+        offsets.append(pos)
+        pos += len(ln)
+    spans = []
+    for i, ln in enumerate(lines):
+        if not _LETTERHEAD_PHONE_LINE.match(ln):
+            continue
+        if any(_RECIPIENT_LINE.match(x) for x in lines[i + 1:i + 1 + _LETTERHEAD_REACH]):
+            spans.append((offsets[i], offsets[i] + len(ln)))
+    return spans
+
+
 # 名單型附件的檔名線索 —— 檔案本身不會送 AI,但出現代表本案涉及名冊,值得提醒。
 _ROSTER_HINT = re.compile(r"(名冊|名單|得獎|錄取|通訊錄|清冊)")
 
@@ -87,8 +113,11 @@ def scan_pii(text, filenames=None):
             if is_valid_tw_id(s) and ("身分證字號", s) not in seen:
                 seen.add(("身分證字號", s))
                 found.append(("身分證字號", s, "通過檢查碼驗算"))
+        letterhead = _letterhead_phone_spans(text)
         for label, rx, why in _PATTERNS:
             for m in rx.finditer(text):
+                if label == "手機號碼" and any(a <= m.start() < b for a, b in letterhead):
+                    continue
                 s = m.group(0).strip()
                 if (label, s) in seen:
                     continue
