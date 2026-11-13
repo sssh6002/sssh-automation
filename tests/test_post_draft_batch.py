@@ -512,6 +512,67 @@ def test_run_stops_when_doc_nowhere(monkeypatch, tmp_path):
     assert not pdb.already_sent(str(tmp_path), it["文號"])
 
 
+def test_run_backfills_marker_when_doc_only_in_unclosed(monkeypatch, tmp_path):
+    """2026-11-13 實測 MWAA1156011727:已陳核到秘書(作業別「陳核(待簽收)」),
+    但「對方未簽收」是 0,只列在「已處理公文 > 未結案」。承辦中又沒有它 →
+    算送出了,補標記、不重送。"""
+    import fill_in_draft as fid
+    import list_pager
+    sent = []
+    monkeypatch.setattr(pdb, "focus_main_window", lambda d: True)
+    monkeypatch.setattr(pdb, "focus_list", lambda d, no: False)
+    monkeypatch.setattr(list_pager, "click_doc_by_no", lambda d, no: True)
+    monkeypatch.setattr(fid, "fill_in_draft", lambda *a, **k: sent.append(1))
+    monkeypatch.setattr(pdb, "sent_out",
+                        lambda d, no, label=pdb.SENT_LABEL: label == pdb.DONE_LABEL)
+    it = {"文號": "MWAA1156011727", "主旨": "機器人", "目錄": str(tmp_path),
+          "送出文字": DEFAULT}
+    done, failed = pdb.run([it], _MultiTabDriver({"h": (HOME, True)}))
+    assert (done, failed) == (1, None)
+    assert sent == []
+    assert pdb.already_sent(str(tmp_path), it["文號"])
+
+
+def test_run_unclosed_list_not_trusted_while_doc_in_pending(monkeypatch, tmp_path):
+    """承辦中找得到它(例如被退回) → 就算「未結案」也有它,照樣要送,不能補標記跳過。"""
+    import fill_in_draft as fid
+    import list_pager
+    sent = []
+    monkeypatch.setattr(pdb, "focus_main_window", lambda d: True)
+    monkeypatch.setattr(pdb, "focus_list", lambda d, no: True)
+    monkeypatch.setattr(list_pager, "click_doc_by_no", lambda d, no: True)
+    monkeypatch.setattr(pdb, "wait_viewer", lambda d, no: True)
+    monkeypatch.setattr(pdb, "ensure_viewer_ready", lambda d: True)
+    monkeypatch.setattr(pdb, "close_viewer", lambda d, no: None)
+    monkeypatch.setattr(pdb.time, "sleep", lambda s: None)
+    monkeypatch.setattr(fid, "fill_in_draft",
+                        lambda *a, **k: sent.append(1) or True)
+    monkeypatch.setattr(pdb, "left_pending", lambda d, no, **k: True)
+    monkeypatch.setattr(pdb, "sent_out",
+                        lambda d, no, label=pdb.SENT_LABEL: label == pdb.DONE_LABEL)
+    it = {"文號": "MWAA1156011727", "主旨": "機器人", "目錄": str(tmp_path),
+          "送出文字": DEFAULT}
+    done, failed = pdb.run([it], _MultiTabDriver({"h": (HOME, True)}))
+    assert (done, failed) == (1, None)
+    assert sent == [1]
+
+
+def test_left_pending_trusts_unclosed_when_pending_unreadable(monkeypatch):
+    _fake_pending_list(monkeypatch, 1, [])
+    monkeypatch.setattr(pdb, "sent_out",
+                        lambda d, no, label=pdb.SENT_LABEL: label == pdb.DONE_LABEL)
+    assert pdb.left_pending(_MultiTabDriver({"h": (HOME, True)}),
+                            "MWAA1156011727", timeout=0) is True
+
+
+def test_left_pending_ignores_unclosed_while_still_in_pending(monkeypatch):
+    _fake_pending_list(monkeypatch, 1, ["MWAA1156011727"])
+    monkeypatch.setattr(pdb, "sent_out",
+                        lambda d, no, label=pdb.SENT_LABEL: label == pdb.DONE_LABEL)
+    assert pdb.left_pending(_MultiTabDriver({"h": (HOME, True)}),
+                            "MWAA1156011727", timeout=0) is False
+
+
 def test_left_pending_trusts_sent_out_list(monkeypatch):
     """承辦中讀不清楚(左邊數字還沒更新、清單空白),但「對方未簽收」看得到它 → 算送出了。"""
     _fake_pending_list(monkeypatch, 1, [])

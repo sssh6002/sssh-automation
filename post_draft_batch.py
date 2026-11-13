@@ -517,6 +517,11 @@ def close_viewer(driver, doc_no):
 
 
 SENT_LABEL = "對方未簽收"   # 已處理公文 > 對方未簽收:剛送出、主管還沒簽收的都在這
+# 已處理公文 > 未結案:送出去、還沒結案的都在這。2026-11-13 實測 MWAA1156011727
+# 已經陳核到秘書那邊(作業別「陳核(待簽收)」),「對方未簽收」卻是 0 —— 它只出現在
+# 這裡。但「未結案」範圍比較寬(被退回、又回到承辦中的公文可能也還掛在這),所以
+# 只在「承辦中確定沒有它」時才拿來當送出證據,見 run() 與 left_pending。
+DONE_LABEL = "未結案"
 
 
 def sent_out(driver, doc_no, label=SENT_LABEL):
@@ -565,6 +570,7 @@ def left_pending(driver, doc_no, label="承辦中", timeout=20.0):
     while True:
         if sent_out(driver, doc_no):
             return True
+        still_listed = False
         driver.switch_to.default_content()
         if click_sidebar(driver, label):
             time.sleep(2.0)
@@ -573,9 +579,14 @@ def left_pending(driver, doc_no, label="承辦中", timeout=20.0):
             driver.switch_to.default_content()
             if _switch_to_frame_with_xpath(driver, _LIST_XPATH, "公文文號表頭",
                                            timeout=5) \
-                    and list_pager.page_doc_nos(driver) \
-                    and not list_pager.find_doc_across_pages(driver, doc_no):
-                return True
+                    and list_pager.page_doc_nos(driver):
+                if not list_pager.find_doc_across_pages(driver, doc_no):
+                    return True
+                still_listed = True
+        # 承辦中讀不清楚(不是「確定還在」)時,再看「未結案」:送出去但「對方未簽收」
+        # 沒列的公文會在那裡(見 DONE_LABEL)。承辦中明明還看得到它就不採信。
+        if not still_listed and sent_out(driver, doc_no, label=DONE_LABEL):
+            return True
         if time.time() >= deadline:
             return False
         time.sleep(2.0)
@@ -620,8 +631,17 @@ def run(ready, driver):
             done += 1
             continue
         if not focus_list(driver, doc_no):
+            # 承辦中沒有它 —— 再看「未結案」:陳核出去但「對方未簽收」沒列的會在那
+            # (2026-11-13 MWAA1156011727)。承辦中確定沒有,才採信未結案這張。
+            if sent_out(driver, doc_no, label=DONE_LABEL):
+                _write_marker(d, doc_no, it["送出文字"], "（補寫:承辦中沒有它、"
+                              "edoc「未結案」裡有，先前其實已送出）")
+                print(f"      OK 承辦中沒有、但「{DONE_LABEL}」裡有這份公文 —— "
+                      "先前其實送出去了，補寫標記，不重送")
+                done += 1
+                continue
             print("      x  切不到含這一筆的「承辦中」清單，"
-                  f"「{SENT_LABEL}」裡也沒有它")
+                  f"「{SENT_LABEL}」「{DONE_LABEL}」裡也都沒有它")
             return done, it
         if not _click_doc_by_no(driver, doc_no):
             print("      x  清單裡找不到這份公文（可能已被送走或不在承辦中）")
